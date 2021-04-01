@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <SPI.h>
+#include <Wire.h>
+#include <U8g2lib.h>
 #define ENABLE_GxEPD2_GFX 0
 
 #include <GxEPD2_BW.h>
