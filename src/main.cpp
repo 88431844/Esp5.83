@@ -5,6 +5,8 @@
 #define ENABLE_GxEPD2_GFX 0
 
 #include <GxEPD2_BW.h>
+#include <GxEPD2_3C.h>
+#include <GxEPD2_7C.h>
 #include <U8g2_for_Adafruit_GFX.h>
 #if defined(ESP8266)
 // select one and adapt to your mapping, can use full buffer size (full HEIGHT)
@@ -89,6 +91,14 @@ GxEPD2_BW < GxEPD2_583, GxEPD2_583::HEIGHT / 2 > display(GxEPD2_583(/*CS=15*/ SS
 //GxEPD2_7C < GxEPD2_565c, GxEPD2_565c::HEIGHT / 4 > display(GxEPD2_565c(/*CS=15*/ SS, /*DC=4*/ 4, /*RST=2*/ 2, /*BUSY=5*/ 5)); // Waveshare 5.65" 7-color
 #endif
 
+#include "u8g2_mfxinran_92_number.h"
+#include "u8g2_deng_56_temperature.h"
+#include "u8g2_mfyuehei_18_gb2312.h"
+#include "u8g2_mfyuehei_14_gb2312.h"
+#include "u8g2_mfyuehei_12_gb2312.h"
+#include "u8g2_mfyuanhei_16_gb2312.h"
+
+U8G2_FOR_ADAFRUIT_GFX u8g2Fonts;
 void setup() {
   // put your setup code here, to run once:
 }
