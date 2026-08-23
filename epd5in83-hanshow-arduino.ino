@@ -156,6 +156,7 @@ void fetchWeather() {
       Serial.printf(" %.1fC code=%d %d slots\n", now_weather.temp, now_weather.code, hourly_count);
     }
     http.end();
+      client.stop();
   } else {
     Serial.println(" begin FAILED");
   }
@@ -193,17 +194,21 @@ void fetchPVE() {
           if (strcmp(type, "qemu") != 0) continue;
           const char* name   = v["name"]   | "?";
           const char* status = v["status"] | "stopped";
+          
           strncpy(vms[vm_count].name, name, 19);
           vms[vm_count].name[19] = '\0';
-          vms[vm_count].running  = (strcmp(status, "running") == 0);
-          vms[vm_count].cpus     = v["maxcpu"] | 0;
-          long long maxmem = v["maxmem"] | 0;
-          vms[vm_count].mem_gb   = maxmem / 1073741824.0f;
+          vms[vm_count].running = (strcmp(status, "running") == 0);
+          vms[vm_count].cpus = v["maxcpu"] | 1;
+          vms[vm_count].mem_gb = (v["maxmem"] | 0) / 1073741824.0;
           vm_count++;
         }
         Serial.printf(" %d VMs\n", vm_count);
+      } else if (httpCode > 0) {
+        String errorPayload = http.getString();
+        Serial.printf("PVE Error Payload: %s\n", errorPayload.c_str());
       }
       http.end();
+      client.stop();
     } else {
       Serial.println(" begin FAILED");
     }
@@ -598,7 +603,7 @@ void setup() {
   connectWifi();
   syncTime();
   fetchWeather();
-  fetchPVE();
+  // fetchPVE();
   fetchNAS();
   
   display.init(115200, true, 2, false);
