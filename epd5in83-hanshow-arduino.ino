@@ -37,6 +37,7 @@ VMInfo vms[8];
 int vm_count = 0;
 PoolInfo pools[4];
 int pool_count = 0;
+uint32_t g_sysUptime = 0;
 struct tm timeinfo;
 
 // ===== GxEPD2 显示器 =====
@@ -210,84 +211,93 @@ void fetchPVE() {
   Serial.printf("Heap after PVE: %d\n", ESP.getFreeHeap());
 }
 
-void fetchNAS() {
-  Serial.printf("Heap before NAS: %d\n", ESP.getFreeHeap());
-  Serial.print("NAS...");
+// 全局缓冲，防止底层库持有栈内指针导致崩溃
+char g_volNameBufs[4][64];
+char* g_volNames[4] = {g_volNameBufs[0], g_volNameBufs[1], g_volNameBufs[2], g_volNameBufs[3]};
+int g_volAlloc[4] = {0, 0, 0, 0};
+int g_volTotal[4] = {0, 0, 0, 0};
+int g_volUsed[4] = {0, 0, 0, 0};
+char g_oidName[4][64];
+char g_oidAlloc[4][64];
+char g_oidTotal[4][64];
+char g_oidUsed[4][64];
 
-  static WiFiUDP udp;
-  static SNMPManager snmp(SNMP_COMMUNITY);
-  
-  snmp._udp = nullptr; 
+void fetchNAS() {
+  WiFiUDP udp;
+  SNMPManager snmp(SNMP_COMMUNITY);
+  snmp._udp = nullptr;
   snmp.setUDP(&udp);
   snmp.begin();
   
-  pool_count = 0;
+  ValueCallback* cb_uptime = snmp.addTimestampHandler(nas_ip, ".1.3.6.1.2.1.25.1.1.0", &g_sysUptime);
   
-  // 核心修复：16个OID的响应超过了库内置的512字节上限(SNMP_PACKET_LENGTH)，
-  // 截断会导致 ASN.1 解析器读到乱码/越界内存，从而引发 malloc 失败和 Exception 29！
-  // 解决办法：分 4 次请求，每次只请求 1 个存储池（4个OID），响应包缩小到 ~200 字节，完美避开溢出。
+  ValueCallback* cb_name[4];
+  ValueCallback* cb_alloc[4];
+  ValueCallback* cb_total[4];
+  ValueCallback* cb_used[4];
+  int vol_indices[4] = {59, 57, 56, 58};
+  
   for(int i = 0; i < 4; i++) {
-    SNMPGet request(SNMP_COMMUNITY, 1);
-    request.setUDP(&udp);
+    char oidBuf[64];
+    sprintf(oidBuf, ".1.3.6.1.2.1.25.2.3.1.3.%d", vol_indices[i]);
+    cb_name[i] = snmp.addStringHandler(nas_ip, oidBuf, &g_volNames[i]);
+    sprintf(oidBuf, ".1.3.6.1.2.1.25.2.3.1.4.%d", vol_indices[i]);
+    cb_alloc[i] = snmp.addIntegerHandler(nas_ip, oidBuf, &g_volAlloc[i]);
+    sprintf(oidBuf, ".1.3.6.1.2.1.25.2.3.1.5.%d", vol_indices[i]);
+    cb_total[i] = snmp.addIntegerHandler(nas_ip, oidBuf, &g_volTotal[i]);
+    sprintf(oidBuf, ".1.3.6.1.2.1.25.2.3.1.6.%d", vol_indices[i]);
+    cb_used[i] = snmp.addIntegerHandler(nas_ip, oidBuf, &g_volUsed[i]);
+  }
+  
+  // Fetch uptime
+  SNMPGet req_up(SNMP_COMMUNITY, 1);
+  req_up.setUDP(&udp);
+  req_up.addOIDPointer(cb_uptime);
+  req_up.sendTo(nas_ip);
+  unsigned long start = millis();
+  while(millis() - start < 1000) { snmp.loop(); delay(10); }
+  
+  pool_count = 0;
+  for(int i = 0; i < 4; i++) {
+    SNMPGet req(SNMP_COMMUNITY, 1);
+    req.setRequestID(1000 + i);
+    req.setUDP(&udp);
+    req.addOIDPointer(cb_name[i]);
+    req.addOIDPointer(cb_alloc[i]);
+    req.addOIDPointer(cb_total[i]);
+    req.addOIDPointer(cb_used[i]);
+    req.sendTo(nas_ip);
     
-    char* poolName = nullptr;
-    int poolStatus = 0;
-    uint64_t poolFree = 0;
-    uint64_t poolTotal = 0;
+    start = millis();
+    while(millis() - start < 1000) { snmp.loop(); delay(10); }
     
-    char oidStr[64];
-    
-    sprintf(oidStr, ".1.3.6.1.4.1.6574.3.1.1.2.%d", i+1);
-    request.addOIDPointer(snmp.addStringHandler(nas_ip, oidStr, &poolName));
-    
-    sprintf(oidStr, ".1.3.6.1.4.1.6574.3.1.1.3.%d", i+1);
-    request.addOIDPointer(snmp.addIntegerHandler(nas_ip, oidStr, &poolStatus));
-    
-    sprintf(oidStr, ".1.3.6.1.4.1.6574.3.1.1.4.%d", i+1);
-    request.addOIDPointer(snmp.addCounter64Handler(nas_ip, oidStr, &poolFree));
-    
-    sprintf(oidStr, ".1.3.6.1.4.1.6574.3.1.1.5.%d", i+1);
-    request.addOIDPointer(snmp.addCounter64Handler(nas_ip, oidStr, &poolTotal));
-    
-    request.sendTo(nas_ip);
-    
-    // 给NAS响应留时间并接收报文
-    unsigned long start = millis();
-    while(millis() - start < 1500) {
-      snmp.loop();
-      delay(10);
-    }
-    
-    // 如果获取到了名字，说明该池子存在
-    if(poolName != nullptr && strlen(poolName) > 0) {
-      strncpy(pools[pool_count].name, poolName, 19);
+    if(g_volNames[i] != nullptr && strlen(g_volNames[i]) > 0) {
+      if (strncmp(g_volNames[i], "/volume", 7) == 0) {
+        sprintf(pools[pool_count].name, "Vol %s", g_volNames[i] + 7);
+      } else {
+        strncpy(pools[pool_count].name, g_volNames[i], 19);
+      }
       pools[pool_count].name[19] = '\0';
-      pools[pool_count].status = poolStatus;
+      pools[pool_count].status = 1;
       
-      float total_tb = poolTotal / 1099511627776.0;
-      float free_tb = poolFree / 1099511627776.0;
+      double allocUnit = g_volAlloc[i];
+      double totalUnits = g_volTotal[i];
+      double usedUnits = g_volUsed[i];
+      
+      float total_tb = (totalUnits * allocUnit) / 1099511627776.0;
+      float used_tb = (usedUnits * allocUnit) / 1099511627776.0;
+      
       pools[pool_count].total_tb = total_tb;
-      pools[pool_count].used_tb = total_tb - free_tb;
+      pools[pool_count].used_tb = used_tb;
       
       if(total_tb > 0) {
-        pools[pool_count].pct = (pools[pool_count].used_tb / total_tb) * 100;
+        pools[pool_count].pct = (used_tb / total_tb) * 100;
       } else {
         pools[pool_count].pct = 0;
       }
-      
-      free(poolName);
       pool_count++;
     }
-    
-    // 每次请求后清理旧的 handlers，避免下一次请求重复叠加
-    // 由于这个库没有提供 clear() 方法，我们会用最简单的黑客手段——在下一次循环丢弃之前的引用。
-    // 但是库里可能会一直累积 callbacks。由于 fetchNAS 只会在开机执行一次，
-    // 累积 4 次 callbacks(共16个)是完全没问题的（内存够用）。
   }
-  
-  udp.stop();
-  Serial.printf(" %d pools\n", pool_count);
-  Serial.printf("Heap after NAS: %d\n", ESP.getFreeHeap());
 }
 
 // ===== 渲染 =====
@@ -503,25 +513,58 @@ void drawPVM(int x, int y, int w, int h) {
 }
 
 void drawNAS(int x, int y, int w, int h) {
-  drawHeader(x, y, w, "Synology Storage Pools");
-  u8g2Fonts.setFont(u8g2_font_helvR08_tf);
-  
+  drawHeader(x, y, w, "Synology NAS");
   int startY = y + 45;
+  
+  u8g2Fonts.setFont(u8g2_font_helvR08_tf);
   for (int i = 0; i < pool_count; i++) {
     int cy = startY + i * 40;
     
     u8g2Fonts.setCursor(x + 10, cy);
     u8g2Fonts.print(pools[i].name);
     
-    char buf[30];
-    sprintf(buf, "%d%% (%.1f/%.1f TB)", pools[i].pct, pools[i].used_tb, pools[i].total_tb);
-    u8g2Fonts.setCursor(x + 100, cy);
+    char buf[40];
+    char usedStr[16], totalStr[16], freeStr[16];
+    
+    if (pools[i].used_tb < 1.0) sprintf(usedStr, "%.0fG", pools[i].used_tb * 1024);
+    else sprintf(usedStr, "%.1fT", pools[i].used_tb);
+    
+    if (pools[i].total_tb < 1.0) sprintf(totalStr, "%.0fG", pools[i].total_tb * 1024);
+    else sprintf(totalStr, "%.1fT", pools[i].total_tb);
+    
+    float free_tb = pools[i].total_tb - pools[i].used_tb;
+    if (free_tb < 1.0) sprintf(freeStr, "%.0fG", free_tb * 1024);
+    else sprintf(freeStr, "%.1fT", free_tb);
+    
+    sprintf(buf, "%s/%s Free:%s", usedStr, totalStr, freeStr);
+    
+    // 右对齐文本
+    int tw = u8g2Fonts.getUTF8Width(buf);
+    u8g2Fonts.setCursor(x + w - tw - 10, cy);
     u8g2Fonts.print(buf);
     
     display.drawRect(x + 10, cy + 5, w - 20, 10, GxEPD_BLACK);
     int barW = (w - 24) * pools[i].pct / 100;
     display.fillRect(x + 12, cy + 7, barW, 6, GxEPD_BLACK);
   }
+}
+
+
+
+void drawBottomBar() {
+  display.fillRect(301, 416, 299, 32, GxEPD_WHITE);
+  display.drawLine(300, 416, 300, 447, GxEPD_BLACK);
+  
+  u8g2Fonts.setFont(u8g2_font_helvR08_tf);
+  u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+  u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+  
+  u8g2Fonts.setCursor(315, 436);
+  u8g2Fonts.print("IP: 192.168.31.105");
+  
+  uint32_t days = g_sysUptime / (100UL * 60 * 60 * 24);
+  u8g2Fonts.setCursor(470, 436);
+  u8g2Fonts.printf("Up: %d d", days);
 }
 
 void renderAll() {
@@ -534,14 +577,18 @@ void renderAll() {
     u8g2Fonts.setForegroundColor(GxEPD_BLACK);
     u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
     
-    display.drawLine(300, 0, 300, 448, GxEPD_BLACK);
+    // 中间分割线到底
+    display.drawLine(300, 0, 300, 447, GxEPD_BLACK);
     display.drawLine(0, 224, 600, 224, GxEPD_BLACK);
+    // 底部横线仅在右侧(NAS)部分
+    display.drawLine(300, 415, 600, 415, GxEPD_BLACK);
     
     drawCalendar(0, 0, 300, 224);
     drawWeather(300, 0, 300, 224);
     drawPVM(0, 224, 300, 224);
-    drawNAS(300, 224, 300, 224);
+    drawNAS(300, 224, 300, 191);
     
+    drawBottomBar();
   } while (display.nextPage());
 }
 
@@ -551,9 +598,8 @@ void setup() {
   connectWifi();
   syncTime();
   fetchWeather();
-  // 听你的，分步调试！先把容易导致崩溃的 PVE 和 NAS 获取注释掉
-  // fetchPVE();
-  // fetchNAS();
+  fetchPVE();
+  fetchNAS();
   
   display.init(115200, true, 2, false);
   u8g2Fonts.begin(display);
@@ -561,7 +607,9 @@ void setup() {
   renderAll();
   
   display.hibernate();
+  // Deep sleep for 10 minutes (600,000,000 microseconds)
   ESP.deepSleep(600e6);
 }
 
-void loop() {}
+void loop() {
+}
