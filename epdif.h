@@ -32,9 +32,9 @@
 
 // Pin definition
 #define RST_PIN         2
-#define DC_PIN          4
+#define DC_PIN          0
 #define CS_PIN          15
-#define BUSY_PIN        5
+#define BUSY_PIN        4
 
 class EpdIf {
 public:

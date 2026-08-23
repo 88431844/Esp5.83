@@ -24,7 +24,7 @@
  */
 
 #include "imagedata.h"
-#include <avr/pgmspace.h>
+#include <pgmspace.h>
 
 const unsigned char IMAGE_DATA1[16800] PROGMEM = { 
 /* 0X00,0X01,0X80,0X02,0X80,0X01, */
