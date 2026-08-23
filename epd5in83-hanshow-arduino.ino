@@ -228,8 +228,11 @@ char g_oidTotal[4][64];
 char g_oidUsed[4][64];
 
 void fetchNAS() {
-  WiFiUDP udp;
-  SNMPManager snmp(SNMP_COMMUNITY);
+  Serial.printf("Heap before NAS: %d\n", ESP.getFreeHeap());
+  Serial.print("NAS...");
+
+  static WiFiUDP udp;
+  static SNMPManager snmp(SNMP_COMMUNITY);
   snmp._udp = nullptr;
   snmp.setUDP(&udp);
   snmp.begin();
@@ -303,6 +306,9 @@ void fetchNAS() {
       pool_count++;
     }
   }
+
+  Serial.printf(" %d pools\n", pool_count);
+  Serial.printf("Heap after NAS: %d\n", ESP.getFreeHeap());
 }
 
 // ===== 渲染 =====
@@ -582,15 +588,14 @@ void renderAll() {
     u8g2Fonts.setForegroundColor(GxEPD_BLACK);
     u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
     
-    // 中间分割线到底
+    // 左下保留给 PVE，右下显示 NAS 面板
     display.drawLine(300, 0, 300, 447, GxEPD_BLACK);
     display.drawLine(0, 224, 600, 224, GxEPD_BLACK);
-    // 底部横线仅在右侧(NAS)部分
     display.drawLine(300, 415, 600, 415, GxEPD_BLACK);
     
     drawCalendar(0, 0, 300, 224);
     drawWeather(300, 0, 300, 224);
-    drawPVM(0, 224, 300, 224);
+    // drawPVM(0, 224, 300, 224);
     drawNAS(300, 224, 300, 191);
     
     drawBottomBar();
