@@ -1,46 +1,157 @@
-# Esp5.83 智能墨水屏看板 (Smart E-Paper Dashboard)
+# ESP8266 5.83 英寸墨水屏看板
 
-基于 ESP8266 和 5.83 寸黑白电子墨水屏打造的个人智能桌面看板。
+基于 ESP8266 和 600 x 448 黑白墨水屏的家庭状态看板。固件每 10 分钟唤醒一次，
+依次获取时间、天气、PVE 和群晖数据，完成一次全屏刷新后进入深度休眠。
 
-## 🌟 功能特性
+## 屏幕布局
 
-屏幕被划分为四个象限，分别展示不同维度的信息（为保证稳定性，网络请求部分支持分步加载）：
+| 区域 | 内容 |
+| --- | --- |
+| 左上 | 当月日历和当天高亮 |
+| 右上 | Open-Meteo 当前天气、8 小时和 7 天预报 |
+| 左下 | PVE 节点状态与 QEMU 虚拟机列表 |
+| 右下 | 群晖存储池状态与容量 |
+| 左底栏 | PVE IP、节点已用/总内存和占用率 |
+| 右底栏 | 群晖 IP 和运行天数 |
 
-1. **日历看板 (左上角)**
-   - 自动连接 WiFi 并获取 NTP 授时。
-   - 自动生成当月日历，并以黑底白字高亮显示当天的日期。
+PVE 虚拟机按“运行中优先、同组 VMID 升序”排列，最多显示 7 台。每行包含
+运行状态、名称、Guest Agent IPv4、配置 CPU 数以及当前/配置内存。运行中 VM
+没有安装或启用 QEMU Guest Agent 时，IP 显示为 `-`。
 
-2. **精细化天气 (右上角)**
-   - 数据源：Open-Meteo (免费、稳定无需 API Key)。
-   - **实时天气**：直观展示当前温度、湿度和风速。
-   - **8 小时预报图表**：以折线图形式呈现未来 8 小时的温度走势，节点上方带有天气图标，下方标注时间。
-   - **7 天预报图表**：在同一坐标系下绘制最高温与最低温的“双折线图”，直观展示一周温差趋势。
+## 项目结构
 
-3. **PVE 虚拟机监控 (左下角 - 规划中/分步调试暂蔽)**
-   - 通过 Proxmox VE REST API 获取各虚拟机的运行状态、CPU 和内存信息。
-   
-4. **群晖 NAS 监控 (右下角 - 规划中/分步调试暂蔽)**
-   - 通过 SNMPv2c 协议获取 Synology NAS 各存储池 (Storage Pool) 状态。
-   - 显示存储池健康状况、总量、已用量，及直观的使用量进度条。
+- `epd5in83-hanshow-arduino.ino`：唯一固件入口和显示/网络流程。
+- `dashboard_model.h`：固定容量 PVE 数据模型和可在主机运行的纯 C++ 辅助函数。
+- `secrets.example.h`：无敏感值的本地配置模板。
+- `test/`：模型测试和源码门禁。
+- `tools/build_firmware.sh`：准备 Arduino 草图目录并编译。
+- `tools/flash_and_monitor.sh`：编译、烧录并立即打开串口监控。
+- `docs/superpowers/`：本次 PVE 功能的设计和执行记录。
 
-## 🛠️ 硬件与开发环境
+仓库不再保留旧 PlatformIO Hello World 入口，避免误用错误引脚或烧录到过时固件。
 
-- **主控芯片**：ESP8266 (NodeMCU)
-- **显示屏幕**：5.83 寸黑白电子墨水屏（引脚：CS=15, DC=0, RST=2, BUSY=4）
-- **核心依赖库**：
-  - `GxEPD2` (驱动墨水屏)
-  - `U8g2_for_Adafruit_GFX` (提供清晰的汉字与排版字体)
-  - `ArduinoJson 7.x` (解析 API 数据)
-  - `SNMP Manager` (读取群晖状态)
+## 硬件与依赖
 
-## 🚀 技术踩坑与深度优化亮点
+- ESP8266 NodeMCU v2
+- 微雪/Good Display 5.83 英寸 V1 黑白屏，600 x 448
+- 显示引脚：`CS=15`、`DC=0`、`RST=2`、`BUSY=4`
+- Arduino CLI 1.5.1
+- ESP8266 Arduino Core 3.1.2
+- ArduinoJson 7.4.3
+- GxEPD2 1.6.9
+- U8g2 for Adafruit GFX
+- Arduino SNMP Manager 1.1.13
 
-在开发过程中，针对 ESP8266 极其有限的内存资源（仅约 40KB 可用 Heap）进行了深度定制和优化：
+## 配置
 
-1. **显示缓冲区极致压缩 (OOM 修复)**
-   - 将 `GxEPD2` 默认的全屏缓冲区 (需 33.6KB 内存) 调整为 32 行的高效分页缓冲 (仅占用 2.4KB)。释放了极其宝贵的 30KB 内存，让后续沉重的 HTTPS 和 JSON 解析得以顺利执行。
-2. **天气流数据完整性保障**
-   - 修复了 ArduinoJson 解析 HTTP 流在遇上 `Chunked` 编码时可能造成解析失败（数据全为 0）的问题，改为利用 `http.getString()` 完整装载后再进行白名单过滤（`Filter`）解析。
-3. **彻底击杀 SNMP 库的 Exception 29 崩溃**
-   - **痛点**：第三方 `SNMP_Manager` 库底层硬编码了最大 UDP 接收长度为 512 字节。当我们一次性向群晖请求 16 个 OID（4个存储池 × 4个指标）时，响应包达到了约 800 字节。由于包被暴力截断，库底层粗糙的 ASN.1 解析器读到了越界乱码，导致 `malloc` 分配疯狂的内存量并触发 `StoreProhibited (Exception 29)` 死机。
-   - **解法**：“化整为零”。将请求拆分为 4 次（每次仅查询 1 个存储池），使每次 SNMP 响应报文缩小到约 200 字节，完美避开 512 字节的魔咒，保持长期运行稳定！
+先创建本地配置：
+
+```sh
+cp secrets.example.h secrets.h
+```
+
+编辑 `secrets.h` 中的四项：
+
+- `WIFI_SSID`
+- `WIFI_PASS`
+- `SNMP_COMMUNITY`
+- `PVE_TOKEN`，格式为 `PVEAPIToken=user@realm!token-id=token-secret`
+
+`secrets.h` 和 `build/` 已被 Git 忽略。不要把有效凭据写入 `.ino`、README 或
+`secrets.example.h`。
+
+站点相关但不敏感的配置位于草图顶部：
+
+- `PVE_HOST`、`PVE_PORT`、`PVE_CERT_FINGERPRINT`
+- `nas_ip`
+- Open-Meteo 经纬度和时区
+
+PVE Token 需要读取节点、集群 VM 资源和运行中 VM Guest Agent 网络接口的权限。
+虚拟机内还需要安装并启用 QEMU Guest Agent。
+
+## 测试与源码门禁
+
+```sh
+sh test/run_dashboard_tests.sh
+sh test/verify_pve_dashboard.sh
+git diff --check
+```
+
+`run_dashboard_tests.sh` 会用主机 C++17 编译器验证 VM 排序、Top-N 保留、节点名
+容量、IPv4 过滤和内存换算。
+
+`verify_pve_dashboard.sh` 就是本项目的“源码门禁”。它在提交前静态确认：
+
+- PVE 与 NAS 获取/渲染调用没有被注释；
+- 三类 PVE API 路径仍存在；
+- VM 列表保持固定容量、完整解析后再提交；
+- Guest Agent 使用选中的规范节点名；
+- PVE 证书指纹校验仍启用；
+- Wi-Fi、SNMP 和 PVE 凭据没有写回可跟踪草图，配置模板仍只含占位值；
+- `secrets.h` 仍被 Git 忽略。
+
+源码门禁只能防止关键结构被误删，不能替代固件编译、真实 API 请求或 ESP8266
+串口内存测试。
+
+## 编译、烧录和监控
+
+编译：
+
+```sh
+sh tools/build_firmware.sh
+```
+
+脚本会生成被忽略的 `build/epd5in83-hanshow-arduino/` 和 `build/output/`，解决
+Arduino CLI 对“草图目录名必须和 `.ino` 文件名一致”的要求。
+
+查看串口：
+
+```sh
+arduino-cli board list
+```
+
+烧录并立即监控：
+
+```sh
+sh tools/flash_and_monitor.sh /dev/cu.usbserial-1120
+```
+
+串口正常周期应依次出现 Wi-Fi、NTP、天气、PVE、NAS 和 `_Update_Full`。PVE 阶段
+会打印空闲堆、最大连续块、碎片率及本轮最低堆。按 `Ctrl-C` 退出监控。
+
+当前验证基线：静态 RAM 37804/80192（47%）、IRAM 61103/65536（93%）、Flash
+432176/1048576（41%）；实机完成 PVE 后空闲堆约 40.7 KB，NAS 后约 38.8 KB，
+未出现 WDT、Exception、复位循环或内存溢出。
+
+## PVE 数据流程
+
+固件按顺序释放每次 HTTPS 和 JSON 对象，避免 ESP8266 堆峰值叠加：
+
+1. `GET /api2/json/nodes`，选择首个在线节点。
+2. `GET /api2/json/cluster/resources?type=vm`，逐对象流式解析并只保留目标节点的
+   固定容量 QEMU Top-N。
+3. 对可见的运行中 VM 请求
+   `/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces`，选择首个非 loopback、
+   非 link-local IPv4。
+
+HTTPS 在发送 Token 前使用 `PVE_CERT_FINGERPRINT` 固定服务器证书。PVE 证书更新后，
+必须同步更新指纹，否则请求会被拒绝。
+
+## 5.83 英寸 V1 局部刷新
+
+微雪官方 V1 Arduino 驱动只提供整帧 `DisplayFrame()`，没有局部窗口或快速局刷
+接口。GxEPD2 虽能限制写入区域，但 `GxEPD2_583` 明确标记
+`hasFastPartialUpdate=false`，局部与全屏刷新都使用约 15 秒波形。因此当前固件不做
+分钟级时间或群晖上下行速率局刷，避免频繁闪屏和长时间保持 ESP8266 唤醒。
+
+- [微雪官方 5.83 V1 Arduino 示例](https://github.com/waveshareteam/e-Paper/tree/master/Arduino/epd5in83)
+- [GxEPD2 项目](https://github.com/ZinggJM/GxEPD2)
+
+## 常见问题
+
+- `PVE node HTTP 401`：检查完整 Token ID、realm、token-id 和 secret 是否匹配。
+- VM IP 为 `-`：确认 VM 正在运行，并安装、启用了 QEMU Guest Agent。
+- PVE 请求在 TLS 阶段失败：重新核对 PVE 当前证书指纹。
+- `Missing secrets.h`：从 `secrets.example.h` 创建本地配置后再编译。
+- 串口出现 WDT、Exception 或持续复位：记录最后一个 `Heap ...` 阶段，不要继续
+  增大 JSON 文档或显示分页缓冲。

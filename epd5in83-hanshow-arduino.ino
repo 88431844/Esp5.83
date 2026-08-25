@@ -8,23 +8,20 @@
 #include <U8g2_for_Adafruit_GFX.h>
 #include <Arduino_SNMP_Manager.h>
 #include <SNMPGet.h>
+#include "dashboard_model.h"
+#include "secrets.h"
 
 // ===== 配置 =====
-const char* WIFI_SSID = "a_luck";
-const char* WIFI_PASS = "w0shiwifI!0";
-
 const char* PVE_HOST = "192.168.31.34";
 const int PVE_PORT = 8006;
-const char* PVE_TOKEN = "PVEAPIToken=root@pam!epd=9d296cd8-5676-4f9b-b174-cda286fb0df1";
+const char* PVE_CERT_FINGERPRINT = "32:2A:C0:E1:C4:73:01:56:33:7D:CD:72:5C:19:72:DD:37:08:EA:C9";
 
 IPAddress nas_ip(192, 168, 31, 105);
-const char* SNMP_COMMUNITY = "nas_snmp";
 
 // ===== 数据结构 =====
 struct WeatherNow { float temp; int code; int humidity; float wind; };
 struct HourlyWeather { int hour; float temp; int code; };
 struct DailyWeather { String day; float tMax; float tMin; int code; };
-struct VMInfo { char name[20]; bool running; int cpus; float mem_gb; };
 struct PoolInfo { char name[20]; int status; float used_tb; float total_tb; int pct; };
 
 // ===== 全局数据 =====
@@ -33,12 +30,14 @@ HourlyWeather hourly[8];
 int hourly_count = 0;
 DailyWeather daily[7];
 int daily_count = 0;
-VMInfo vms[8];
+PveNodeInfo pve_node;
+VMInfo vms[MAX_PVE_VMS];
 int vm_count = 0;
 PoolInfo pools[4];
 int pool_count = 0;
 uint32_t g_sysUptime = 0;
 struct tm timeinfo;
+uint32_t min_free_heap = UINT32_MAX;
 
 // ===== GxEPD2 显示器 =====
 // 将缓冲从全屏(HEIGHT, 33.6KB)改为32行(2.4KB)，解决 OOM 崩溃问题
@@ -76,6 +75,19 @@ void syncTime() {
 }
 
 // ===== 数据获取 =====
+void copyText(char* destination, size_t capacity, const char* source) {
+  if (capacity == 0) return;
+  strncpy(destination, source ? source : "", capacity - 1);
+  destination[capacity - 1] = '\0';
+}
+
+void logHeap(const char* stage) {
+  uint32_t freeHeap = ESP.getFreeHeap();
+  if (freeHeap < min_free_heap) min_free_heap = freeHeap;
+  Serial.printf("Heap %-14s free=%u max=%u frag=%u%% min=%u\n", stage,
+    freeHeap, ESP.getMaxFreeBlockSize(), ESP.getHeapFragmentation(), min_free_heap);
+}
+
 void fetchWeather() {
   Serial.printf("Heap before weather: %d\n", ESP.getFreeHeap());
   Serial.print("Weather...");
@@ -163,57 +175,227 @@ void fetchWeather() {
   Serial.printf("Heap after weather: %d\n", ESP.getFreeHeap());
 }
 
-void fetchPVE() {
-  Serial.printf("Heap before PVE: %d\n", ESP.getFreeHeap());
-  Serial.print("PVE...");
-  {
-    WiFiClientSecure client;
-    client.setInsecure();
-    HTTPClient http;
-    http.setTimeout(10000);
-    String url = String("https://") + PVE_HOST + ":" + PVE_PORT
-               + "/api2/json/cluster/resources?type=vm";
-    if (http.begin(client, url)) {
-      http.addHeader("Authorization", PVE_TOKEN);
-      int httpCode = http.GET();
-      Serial.printf(" HTTP %d\n", httpCode);
-      if (httpCode == HTTP_CODE_OK) {
-        JsonDocument filter;
-        filter["data"][0]["name"]   = true;
-        filter["data"][0]["status"] = true;
-        filter["data"][0]["maxcpu"] = true;
-        filter["data"][0]["maxmem"] = true;
-        filter["data"][0]["type"]   = true;
-        JsonDocument doc;
-        deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
-        JsonArray data = doc["data"];
-        vm_count = 0;
-        for (JsonObject v : data) {
-          if (vm_count >= 8) break;
-          const char* type = v["type"] | "";
-          if (strcmp(type, "qemu") != 0) continue;
-          const char* name   = v["name"]   | "?";
-          const char* status = v["status"] | "stopped";
-          
-          strncpy(vms[vm_count].name, name, 19);
-          vms[vm_count].name[19] = '\0';
-          vms[vm_count].running = (strcmp(status, "running") == 0);
-          vms[vm_count].cpus = v["maxcpu"] | 1;
-          vms[vm_count].mem_gb = (v["maxmem"] | 0) / 1073741824.0;
-          vm_count++;
-        }
-        Serial.printf(" %d VMs\n", vm_count);
-      } else if (httpCode > 0) {
-        String errorPayload = http.getString();
-        Serial.printf("PVE Error Payload: %s\n", errorPayload.c_str());
-      }
-      http.end();
-      client.stop();
-    } else {
-      Serial.println(" begin FAILED");
-    }
+void configurePVEClient(WiFiClientSecure& client, HTTPClient& http) {
+  client.setFingerprint(PVE_CERT_FINGERPRINT);
+  client.setBufferSizes(1024, 512);
+  client.setTimeout(8000);
+  http.useHTTP10(true);
+  http.setReuse(false);
+  http.setTimeout(8000);
+}
+
+bool fetchPVENode() {
+  WiFiClientSecure client;
+  HTTPClient http;
+  configurePVEClient(client, http);
+
+  char url[96];
+  snprintf(url, sizeof(url), "https://%s:%d/api2/json/nodes", PVE_HOST, PVE_PORT);
+  if (!http.begin(client, url)) {
+    Serial.println("PVE node begin FAILED");
+    return false;
   }
-  Serial.printf("Heap after PVE: %d\n", ESP.getFreeHeap());
+  http.addHeader("Authorization", PVE_TOKEN);
+  const int httpCode = http.GET();
+  bool ok = false;
+  if (httpCode == HTTP_CODE_OK) {
+    JsonDocument filter;
+    filter["data"][0]["node"] = true;
+    filter["data"][0]["status"] = true;
+    filter["data"][0]["mem"] = true;
+    filter["data"][0]["maxmem"] = true;
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(
+      doc, http.getStream(), DeserializationOption::Filter(filter));
+    if (!error) {
+      JsonObject selected;
+      for (JsonObject node : doc["data"].as<JsonArray>()) {
+        if (selected.isNull()) selected = node;
+        const char* status = node["status"] | "unknown";
+        if (strcmp(status, "online") == 0) {
+          selected = node;
+          break;
+        }
+      }
+      if (!selected.isNull()) {
+        copyText(pve_node.name, sizeof(pve_node.name), selected["node"] | "PVE");
+        pve_node.online = strcmp(selected["status"] | "unknown", "online") == 0;
+        pve_node.mem_bytes = selected["mem"].as<uint64_t>();
+        pve_node.maxmem_bytes = selected["maxmem"].as<uint64_t>();
+        ok = true;
+      }
+    } else {
+      Serial.printf("PVE node JSON %s\n", error.c_str());
+    }
+  } else {
+    Serial.printf("PVE node HTTP %d\n", httpCode);
+  }
+  http.end();
+  client.stop();
+  delay(0);
+  return ok;
+}
+
+bool seekPVEDataArray(Stream& stream) {
+  if (!stream.find("\"data\"")) return false;
+  return stream.find("[");
+}
+
+int peekPVEJsonToken(Stream& stream) {
+  const unsigned long started = millis();
+  while (millis() - started < 8000) {
+    const int value = stream.peek();
+    if (value < 0) {
+      delay(0);
+      continue;
+    }
+    if (value == ',' || value == ' ' || value == '\r' || value == '\n' || value == '\t') {
+      stream.read();
+      continue;
+    }
+    return value;
+  }
+  return -1;
+}
+
+bool fetchPVEVMs() {
+  WiFiClientSecure client;
+  HTTPClient http;
+  configurePVEClient(client, http);
+
+  char url[128];
+  snprintf(url, sizeof(url),
+    "https://%s:%d/api2/json/cluster/resources?type=vm", PVE_HOST, PVE_PORT);
+  if (!http.begin(client, url)) {
+    Serial.println("PVE VM begin FAILED");
+    return false;
+  }
+  http.addHeader("Authorization", PVE_TOKEN);
+  const int httpCode = http.GET();
+  bool ok = false;
+  if (httpCode == HTTP_CODE_OK) {
+    Stream& stream = http.getStream();
+    JsonDocument filter;
+    filter["vmid"] = true;
+    filter["node"] = true;
+    filter["name"] = true;
+    filter["status"] = true;
+    filter["maxcpu"] = true;
+    filter["mem"] = true;
+    filter["maxmem"] = true;
+    filter["type"] = true;
+    JsonDocument item;
+    size_t retainedCount = 0;
+
+    if (seekPVEDataArray(stream)) {
+      while (true) {
+        const int token = peekPVEJsonToken(stream);
+        if (token == ']') {
+          stream.read();
+          ok = true;
+          break;
+        }
+        if (token != '{') {
+          Serial.println("PVE VM JSON framing error");
+          break;
+        }
+
+        item.clear();
+        DeserializationError error = deserializeJson(
+          item, stream, DeserializationOption::Filter(filter));
+        if (error) {
+          Serial.printf("PVE VM JSON %s\n", error.c_str());
+          break;
+        }
+
+        JsonObject source = item.as<JsonObject>();
+        if (strcmp(source["type"] | "", "qemu") != 0) continue;
+        const char* sourceNode = source["node"] | "";
+        if (strcmp(sourceNode, pve_node.name) != 0) continue;
+
+        VMInfo candidate = {};
+        candidate.vmid = source["vmid"] | 0;
+        copyText(candidate.name, sizeof(candidate.name), source["name"] | "?");
+        copyText(candidate.ip, sizeof(candidate.ip), "-");
+        candidate.running = strcmp(source["status"] | "stopped", "running") == 0;
+        candidate.cpus = source["maxcpu"] | 1;
+        candidate.mem_bytes = source["mem"].as<uint64_t>();
+        candidate.maxmem_bytes = source["maxmem"].as<uint64_t>();
+        insertPreferredVM(vms, retainedCount, MAX_PVE_VMS, candidate);
+      }
+    }
+    vm_count = static_cast<int>(committedVMCount(ok, retainedCount));
+  } else {
+    Serial.printf("PVE VM HTTP %d\n", httpCode);
+  }
+  http.end();
+  client.stop();
+  delay(0);
+  return ok;
+}
+
+void fetchPVEGuestIP(VMInfo& vm) {
+  if (!vm.running || !pve_node.name[0]) return;
+  WiFiClientSecure client;
+  HTTPClient http;
+  configurePVEClient(client, http);
+
+  char url[192];
+  snprintf(url, sizeof(url),
+    "https://%s:%d/api2/json/nodes/%s/qemu/%d/agent/network-get-interfaces",
+    PVE_HOST, PVE_PORT, pve_node.name, vm.vmid);
+  if (!http.begin(client, url)) return;
+  http.addHeader("Authorization", PVE_TOKEN);
+  const int httpCode = http.GET();
+  if (httpCode == HTTP_CODE_OK) {
+    JsonDocument filter;
+    filter["data"]["result"][0]["ip-addresses"][0]["ip-address"] = true;
+    filter["data"]["result"][0]["ip-addresses"][0]["ip-address-type"] = true;
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(
+      doc, http.getStream(), DeserializationOption::Filter(filter));
+    if (!error) {
+      for (JsonObject interface : doc["data"]["result"].as<JsonArray>()) {
+        for (JsonObject address : interface["ip-addresses"].as<JsonArray>()) {
+          const char* value = address["ip-address"] | "";
+          const char* type = address["ip-address-type"] | "";
+          if ((type[0] == '\0' || strcmp(type, "ipv4") == 0) && isUsableGuestIPv4(value)) {
+            copyText(vm.ip, sizeof(vm.ip), value);
+            break;
+          }
+        }
+        if (strcmp(vm.ip, "-") != 0) break;
+      }
+    }
+  } else {
+    Serial.printf("PVE VM %d agent HTTP %d\n", vm.vmid, httpCode);
+  }
+  http.end();
+  client.stop();
+  delay(0);
+}
+
+void fetchPVE() {
+  memset(&pve_node, 0, sizeof(pve_node));
+  copyText(pve_node.name, sizeof(pve_node.name), "PVE");
+  copyText(pve_node.ip, sizeof(pve_node.ip), PVE_HOST);
+  vm_count = 0;
+
+  Serial.println("PVE...");
+  logHeap("before PVE");
+  const bool nodeOk = fetchPVENode();
+  logHeap("after node");
+  const bool vmOk = nodeOk && fetchPVEVMs();
+  logHeap("after VM list");
+  const int visible = min(vm_count, static_cast<int>(MAX_VISIBLE_PVE_VMS));
+  for (int i = 0; i < visible; ++i) {
+    if (!vms[i].running) break;
+    fetchPVEGuestIP(vms[i]);
+    logHeap("after guest IP");
+  }
+  Serial.printf("PVE node=%s %s, VMs=%d\n", pve_node.name,
+    nodeOk ? "OK" : "FAILED", vmOk ? vm_count : 0);
+  logHeap("after PVE");
 }
 
 // 全局缓冲，防止底层库持有栈内指针导致崩溃
@@ -500,25 +682,45 @@ void drawWeather(int x, int y, int w, int h) {
   }
 }
 
-void drawPVM(int x, int y, int w, int h) {
-  drawHeader(x, y, w, "PVE Virtual Machines");
+void drawPVE(int x, int y, int w, int h) {
+  char title[32];
+  snprintf(title, sizeof(title), "PVE %s", pve_node.name);
+  drawHeader(x, y, w, title);
   u8g2Fonts.setFont(u8g2_font_helvR08_tf);
-  
-  int startY = y + 45;
-  for (int i = 0; i < vm_count; i++) {
-    int cy = startY + i * 20;
+
+  u8g2Fonts.setCursor(x + 18, y + 41);
+  u8g2Fonts.print("VM");
+  u8g2Fonts.setCursor(x + 92, y + 41);
+  u8g2Fonts.print("IP");
+  u8g2Fonts.setCursor(x + 196, y + 41);
+  u8g2Fonts.print("C");
+  u8g2Fonts.setCursor(x + 220, y + 41);
+  u8g2Fonts.print("MEM");
+  display.drawLine(x, y + 45, x + w, y + 45, GxEPD_BLACK);
+
+  const int visible = min(vm_count, static_cast<int>(MAX_VISIBLE_PVE_VMS));
+  for (int i = 0; i < visible; i++) {
+    int cy = y + 62 + i * 20;
     if (vms[i].running) {
-      display.fillCircle(x + 10, cy - 4, 4, GxEPD_BLACK);
+      display.fillCircle(x + 8, cy - 4, 3, GxEPD_BLACK);
     } else {
-      display.drawCircle(x + 10, cy - 4, 4, GxEPD_BLACK);
+      display.drawCircle(x + 8, cy - 4, 3, GxEPD_BLACK);
     }
-    
-    u8g2Fonts.setCursor(x + 25, cy);
-    u8g2Fonts.print(vms[i].name);
-    
-    char buf[30];
-    sprintf(buf, "%dC %.1fG", vms[i].cpus, vms[i].mem_gb);
-    u8g2Fonts.setCursor(x + 150, cy);
+
+    char name[13];
+    copyText(name, sizeof(name), vms[i].name);
+    u8g2Fonts.setCursor(x + 18, cy);
+    u8g2Fonts.print(name);
+    u8g2Fonts.setCursor(x + 92, cy);
+    u8g2Fonts.print(vms[i].ip);
+    u8g2Fonts.setCursor(x + 196, cy);
+    u8g2Fonts.print(vms[i].cpus);
+
+    char buf[20];
+    const float usedGb = bytesToGiB(vms[i].mem_bytes);
+    const float totalGb = bytesToGiB(vms[i].maxmem_bytes);
+    snprintf(buf, sizeof(buf), "%.1f/%.1fG", usedGb, totalGb);
+    u8g2Fonts.setCursor(x + 220, cy);
     u8g2Fonts.print(buf);
   }
 }
@@ -562,7 +764,23 @@ void drawNAS(int x, int y, int w, int h) {
 
 
 
-void drawBottomBar() {
+void drawPVEBottomBar() {
+  display.fillRect(0, 416, 300, 32, GxEPD_WHITE);
+
+  u8g2Fonts.setFont(u8g2_font_helvR08_tf);
+  u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+  u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+  u8g2Fonts.setCursor(10, 436);
+  u8g2Fonts.printf("IP:%s", pve_node.ip);
+
+  const float usedGb = bytesToGiB(pve_node.mem_bytes);
+  const float totalGb = bytesToGiB(pve_node.maxmem_bytes);
+  const uint8_t pct = memoryPercent(pve_node.mem_bytes, pve_node.maxmem_bytes);
+  u8g2Fonts.setCursor(132, 436);
+  u8g2Fonts.printf("Mem:%.1f/%.1fG %u%%", usedGb, totalGb, pct);
+}
+
+void drawNASBottomBar() {
   display.fillRect(301, 416, 299, 32, GxEPD_WHITE);
   display.drawLine(300, 416, 300, 447, GxEPD_BLACK);
   
@@ -588,17 +806,17 @@ void renderAll() {
     u8g2Fonts.setForegroundColor(GxEPD_BLACK);
     u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
     
-    // 左下保留给 PVE，右下显示 NAS 面板
     display.drawLine(300, 0, 300, 447, GxEPD_BLACK);
     display.drawLine(0, 224, 600, 224, GxEPD_BLACK);
-    display.drawLine(300, 415, 600, 415, GxEPD_BLACK);
+    display.drawLine(0, 415, 600, 415, GxEPD_BLACK);
     
     drawCalendar(0, 0, 300, 224);
     drawWeather(300, 0, 300, 224);
-    // drawPVM(0, 224, 300, 224);
+    drawPVE(0, 224, 300, 191);
     drawNAS(300, 224, 300, 191);
-    
-    drawBottomBar();
+
+    drawPVEBottomBar();
+    drawNASBottomBar();
   } while (display.nextPage());
 }
 
@@ -608,9 +826,10 @@ void setup() {
   connectWifi();
   syncTime();
   fetchWeather();
-  // fetchPVE();
+  fetchPVE();
   fetchNAS();
-  
+
+  Serial.flush();
   display.init(115200, true, 2, false);
   u8g2Fonts.begin(display);
   
