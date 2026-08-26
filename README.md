@@ -164,11 +164,12 @@ sh tools/flash_partial_clock.sh /dev/cu.usbserial-1120
 再次全刷以限制残影。串口日志格式如下：
 
 ```text
-Clock 12:34:56 partial=42 refresh_ms=380 heap=42112
+Clock 12:34:56 partial=42 refresh_ms=755 heap=37312
 ```
 
-快速 LUT 来自未经屏厂确认的实验驱动，存在残影、寿命缩短或损坏面板的风险，
-仅用于短时验证。
+测试驱动使用参考代码预留的 `0x39` PLL（同系列驱动标注约 200 Hz），实机局刷
+约 755 ms。快速 LUT 和高速 PLL 均未经屏厂确认，存在残影、寿命缩短或损坏面板
+的风险，仅用于短时验证。
 
 ## 常见问题
 

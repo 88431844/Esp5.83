@@ -5,6 +5,8 @@
 
 namespace {
 
+constexpr uint8_t FAST_PLL = 0x39;
+
 const uint8_t lut_20_lutc_fast[] PROGMEM = {
     0x01, 0x00, 0x00, 0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
@@ -125,7 +127,7 @@ void GxEPD2_583_FastClock::loadFastLut() {
   _writeData(0xCC);
   _writeData(0x28);
   _writeCommand(0x30);
-  _writeData(0x3A);
+  _writeData(FAST_PLL);
   _writeCommand(0x41);
   _writeData(0x00);
   _writeCommand(0x50);

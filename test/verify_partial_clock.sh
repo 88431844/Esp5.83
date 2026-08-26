@@ -18,6 +18,7 @@ rg -q 'class GxEPD2_583_FastClock : public GxEPD2_583' "$driver_header"
 rg -q 'beginFastMode' "$driver_header"
 rg -q 'refreshClockWindow' "$driver_header"
 rg -q 'lut_20_lutc_fast' "$driver_source"
+rg -q 'FAST_PLL = 0x39' "$driver_source"
 
 if rg -q 'uint8_t[^;]*(600|WIDTH)[^;]*/ *8[^;]*(448|HEIGHT)' "$driver_header"; then
   echo "Full-screen image buffer is forbidden in the fast clock driver" >&2
