@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <epd/GxEPD2_583.h>
+#include <GxEPD2_BW.h>
 
 class GxEPD2_583_FastClock : public GxEPD2_583 {
  public:

@@ -147,6 +147,29 @@ HTTPS 在发送 Token 前使用 `PVE_CERT_FINGERPRINT` 固定服务器证书。P
 - [微雪官方 5.83 V1 Arduino 示例](https://github.com/waveshareteam/e-Paper/tree/master/Arduino/epd5in83)
 - [GxEPD2 项目](https://github.com/ZinggJM/GxEPD2)
 
+### 实验性高速局刷时钟
+
+`codex/partial-refresh-clock-test` 分支包含独立的 `HH:MM:SS` 测试固件。它参考
+V1.2 替换驱动的快速 LUT 和差分像素编码，但只保留 424 x 112 时钟窗口的两帧
+缓存，不修改全局安装的 GxEPD2，也不改变生产看板入口。
+
+```sh
+sh test/run_partial_clock_tests.sh
+sh test/verify_partial_clock.sh
+sh tools/build_partial_clock.sh
+sh tools/flash_partial_clock.sh /dev/cu.usbserial-1120
+```
+
+启动时会执行一次全屏清白，之后每秒仅刷新屏幕中央时钟窗口；每 300 次局刷会
+再次全刷以限制残影。串口日志格式如下：
+
+```text
+Clock 12:34:56 partial=42 refresh_ms=380 heap=42112
+```
+
+快速 LUT 来自未经屏厂确认的实验驱动，存在残影、寿命缩短或损坏面板的风险，
+仅用于短时验证。
+
 ## 常见问题
 
 - `PVE node HTTP 401`：检查完整 Token ID、realm、token-id 和 secret 是否匹配。
