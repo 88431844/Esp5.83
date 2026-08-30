@@ -1,14 +1,16 @@
 # ESP8266 5.83 英寸墨水屏看板
 
-基于 ESP8266 和 600 x 448 黑白墨水屏的家庭状态看板。固件每 10 分钟唤醒一次，
-依次获取时间、天气、PVE 和群晖数据，完成一次全屏刷新后进入深度休眠。
+基于 ESP8266 和 600 x 448 黑白墨水屏的家庭状态看板。固件启动后保持唤醒。
+Wi-Fi 已连接时，群晖 RX/TX 请求按 5 秒起点到起点调度；时间、天气、PVE 和群晖
+完整数据按 10 分钟全刷起点到起点调度，并用 GxEPD2 标准白底波形清理局刷残影。
+群晖 IP 和运行天数保留在底栏，只在全刷时更新。
 
 ## 屏幕布局
 
 | 区域 | 内容 |
 | --- | --- |
-| 左上 | 当月日历和当天高亮 |
-| 右上 | Open-Meteo 当前天气、8 小时和 7 天预报 |
+| 左上 | 中文年月日/星期标题、周一起始月历和居中当天高亮 |
+| 右上 | 中文今天天气/日期、当前天气、8 小时和 7 天预报 |
 | 左下 | PVE 节点状态与 QEMU 虚拟机列表 |
 | 右下 | 群晖存储池状态与容量 |
 | 左底栏 | PVE IP、节点已用/总内存和占用率 |
@@ -74,6 +76,8 @@ PVE Token 需要读取节点、集群 VM 资源和运行中 VM Guest Agent 网�
 ```sh
 sh test/run_dashboard_tests.sh
 sh test/verify_pve_dashboard.sh
+sh test/run_partial_clock_tests.sh
+sh test/verify_partial_clock.sh
 git diff --check
 ```
 
@@ -116,12 +120,50 @@ arduino-cli board list
 sh tools/flash_and_monitor.sh /dev/cu.usbserial-1120
 ```
 
-串口正常周期应依次出现 Wi-Fi、NTP、天气、PVE、NAS 和 `_Update_Full`。PVE 阶段
-会打印空闲堆、最大连续块、碎片率及本轮最低堆。按 `Ctrl-C` 退出监控。
+串口启动时会先记录 NAS 接口发现和首个计数器基线，再出现
+`Full refresh reason=startup`，随后依次出现 NTP、天气、PVE、NAS、`StandardFull`、
+快速局刷模式状态和 `Full refresh complete`。运行中每次速率局刷会记录是否成功、
+耗时和空闲堆；10 分钟周期使用
+`Full refresh reason=scheduled`，局刷 BUSY 超时后的标准全刷恢复使用
+`Full refresh reason=partial-recovery source=cached`。全刷或快速模式恢复失败后的
+缓存退避重试使用 `Full refresh reason=readiness-recovery source=cached`。缓存恢复跳过
+NTP、天气、PVE 和 NAS 请求，直接用最后一份内存数据执行标准全刷；10 分钟周期和
+Wi-Fi 重连全刷仍会重新获取全部远端元数据。PVE 阶段和每次全刷结束还会打印空闲堆、
+最大连续块、碎片率及本轮最低堆。按 `Ctrl-C` 退出监控。
 
-当前验证基线：静态 RAM 37804/80192（47%）、IRAM 61103/65536（93%）、Flash
-432176/1048576（41%）；实机完成 PVE 后空闲堆约 40.7 KB，NAS 后约 38.8 KB，
-未出现 WDT、Exception、复位循环或内存溢出。
+典型日志如下：
+
+```text
+NAS interface index=...
+NAS network rx=... tx=... rx_rate=0 tx_rate=0 valid=0
+Full refresh reason=startup
+NAS speed partial mode ok=1 heap=...
+Full refresh complete reason=startup ready=1
+Heap full refresh   free=... max=... frag=...% min=...
+NAS speed partial ok=1 ms=... heap=...
+```
+
+Wi-Fi 断开后，速率窗口只局刷一次 `RX:-- TX:--`，并暂停 5 秒/10 分钟的联网周期。
+手动 Wi-Fi 尝试按 30 秒起点到起点调度；单次 `connectWifi()` 最多阻塞 20 秒。
+离线连接或鉴权失败产生的断开事件不会重置这次尝试的起点。
+固件持久保存 ESP8266 Wi-Fi 断开事件处理器；即使在 NTP、天气、PVE 或 NAS 阻塞请求
+期间掉线后自动重连，主循环仍会丢弃断网前的计数器基线、强制重新发现接口并排队
+`Full refresh reason=wifi-reconnected`。重连全刷受标准全刷保护间隔约束，并把下一轮
+10 分钟周期锚定到实际开始时间。全刷完成后至少等待 5 秒才开始下一次速率请求。
+
+标准全刷、关电和快速局刷都检查 BUSY 结果。标准全刷 BUSY 成功后，固件先把当前
+速率画布复制为局刷像素基线，再尝试进入快速模式；如果快速模式恢复失败，该基线仍
+与已完成的全刷一致，但显示保持不可局刷，恢复成功前不会发送局刷命令。标准全刷
+失败时不会复制基线。所有标准全刷尝试从上一次尝试完成起共用 60 秒保护间隔，避免
+周期、重连或恢复路径连续闪屏；到期但被保护间隔阻挡的周期任务保持待处理，期间已就绪
+的速率局刷仍可继续。缓存恢复不会改变原有 10 分钟周期锚点。
+PVE 节点/VM 列表或 NAS 卷请求不完整时继续显示上一份有效
+快照；单个 Guest Agent 请求失败时保留该 VM 的旧 IP。NTP 失败会保留上次有效时间，
+冷启动且无有效时间时日历显示 `时间不可用`。
+
+当前编译基线：静态 RAM 49116/80192（61%）、IRAM 61103/65536（93%）、Flash
+759116/1048576（72%）。局刷调度仍需通过实机验收确认长期空闲堆、BUSY 时序、
+断网重连和残影表现；完成实机验收前不应据此提交生产固件。
 
 ## PVE 数据流程
 
@@ -139,15 +181,26 @@ HTTPS 在发送 Token 前使用 `PVE_CERT_FINGERPRINT` 固定服务器证书。P
 
 ## 5.83 英寸 V1 局部刷新
 
-微雪官方 V1 Arduino 驱动只提供整帧 `DisplayFrame()`，没有局部窗口或快速局刷
-接口。GxEPD2 虽能限制写入区域，但 `GxEPD2_583` 明确标记
-`hasFastPartialUpdate=false`，局部与全屏刷新都使用约 15 秒波形。因此当前固件不做
-分钟级时间或群晖上下行速率局刷，避免频繁闪屏和长时间保持 ESP8266 唤醒。
+微雪官方 V1 Arduino 驱动只提供整帧 `DisplayFrame()`，GxEPD2 的
+`GxEPD2_583` 也明确标记 `hasFastPartialUpdate=false`。本项目因此在仓库内维护
+`GxEPD2_583_FastPartial` 实验驱动，不修改 Arduino 全局库。生产看板只为右下角
+296 x 16 的 RX/TX 窗口保留两帧缓存并使用差分快速波形；其余区域不会在 5 秒
+周期中改写。每 10 分钟仍由标准 `renderAll()` 白底全刷更新所有数据并清理残影，
+不会把实验 LUT 用作自定义灰阶全帧波形。
+
+群晖网卡索引不是写死的。固件根据 NAS IPv4 通过 `ipAdEntIfIndex` 运行时发现接口，
+再读取该接口的 `ifHCInOctets` 和 `ifHCOutOctets` 64 位计数器；接口会定期重新发现，
+连续请求失败或接口变化时也会重新绑定计数器 OID。首次采样只建立基线，后续采样
+才显示按实际采样间隔计算的速率。孤立请求失败会保留基线；连续 3 次失败、基线超过
+60 秒、Wi-Fi 断开或全刷期间检测到掉线时会强制重新建立基线，避免显示长时间平均值。
+
+快速 LUT 未经屏厂确认。即使有 10 分钟标准全刷清理，长期运行仍可能增加残影、
+缩短面板寿命或损坏面板；应先观察实机温升、BUSY 行为和残影再决定是否长期使用。
 
 - [微雪官方 5.83 V1 Arduino 示例](https://github.com/waveshareteam/e-Paper/tree/master/Arduino/epd5in83)
 - [GxEPD2 项目](https://github.com/ZinggJM/GxEPD2)
 
-### 实验性高速局刷时钟
+### 独立高速局刷时钟测试
 
 `codex/partial-refresh-clock-test` 分支包含独立的 `HH:MM:SS` 测试固件。它参考
 V1.2 替换驱动的快速 LUT 和差分像素编码，但只保留 424 x 112 时钟窗口的两帧
@@ -160,16 +213,17 @@ sh tools/build_partial_clock.sh
 sh tools/flash_partial_clock.sh /dev/cu.usbserial-1120
 ```
 
-启动时会执行一次全屏清白，之后每秒仅刷新屏幕中央时钟窗口；每 300 次局刷会
-再次全刷以限制残影。串口日志格式如下：
+启动时会执行一次全屏清白，之后每秒仅刷新屏幕中央时钟窗口；每 600 次局刷会
+再次全刷以限制残影。全屏清白会检查标准全刷 BUSY 结果；失败后停止继续局刷，并按
+60 秒退避重新执行完整清白和快速模式初始化。串口日志格式如下：
 
 ```text
 Clock 12:34:56 partial=42 refresh_ms=755 heap=37312
 ```
 
-测试驱动使用参考代码预留的 `0x39` PLL（同系列驱动标注约 200 Hz），实机局刷
-约 755 ms。快速 LUT 和高速 PLL 均未经屏厂确认，存在残影、寿命缩短或损坏面板
-的风险，仅用于短时验证。
+测试与生产局刷共用仓库内的通用快速驱动；实际刷新时间以串口
+`refresh_ms`/`ms` 日志为准。快速 LUT 未经屏厂确认，存在残影、寿命缩短或损坏
+面板的风险。
 
 ## 常见问题
 

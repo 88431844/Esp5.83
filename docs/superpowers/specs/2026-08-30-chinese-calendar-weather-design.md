@@ -19,10 +19,12 @@ in Chinese.
 
 ## Typography and Text
 
-Use `u8g2_font_wqy16_t_chinese1` for Chinese headers and weekday labels. This
-font is already bundled with U8g2 for Adafruit GFX and adds about 14 KB of
-linked Flash, which fits the current firmware budget. Use UTF-8 drawing APIs so
-the source strings remain readable.
+Use `u8g2_font_wqy16_t_gb2312` for Chinese headers, weather labels, and weekday
+labels. The smaller `chinese1` font partition omits several required glyphs;
+the bundled complete GB2312 font covers every requested string. It adds about
+318 KB of linked Flash and leaves the compiled firmware at 72% Flash usage,
+without increasing RAM or IRAM. Use UTF-8 drawing APIs so the source strings
+remain readable.
 
 Use `u8g2_font_helvB14_tf` for calendar date numbers. The current 8-point font
 leaves too much unused space in cells that are approximately 41 pixels wide
