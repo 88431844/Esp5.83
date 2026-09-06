@@ -157,27 +157,20 @@ bool GxEPD2_583_FastPartial::beginFastMode() {
     return false;
   }
   loadFastLut();
-  if (!_power_is_on) {
-    _writeCommand(0x04);
-    if (!waitWhileBusyStatus("FastPartialPowerOn", power_on_time)) {
-      invalidateFastMode();
-      return false;
-    }
-    _power_is_on = true;
-  }
   _using_partial_mode = true;
   _initial_write = false;
-  return true;
+  return powerOffFastMode();
 }
 
 bool GxEPD2_583_FastPartial::refreshWindow(
     const uint8_t* image, uint8_t* previous, size_t length,
     int16_t x, int16_t y, int16_t width, int16_t height) {
-  if (!image || !previous || !_power_is_on || !_using_partial_mode ||
+  if (!image || !previous || !_using_partial_mode ||
       !partial_refresh::isValidWindow(
           WIDTH, HEIGHT, x, y, width, height, length)) {
     return false;
   }
+  if (!powerOnFastMode()) return false;
 
   _writeCommand(0x91);
   setPartialRamArea(0, 0, WIDTH, HEIGHT);
@@ -213,6 +206,8 @@ bool GxEPD2_583_FastPartial::refreshWindow(
     return false;
   }
   _writeCommand(0x92);
+
+  if (!powerOffFastMode()) return false;
 
   memcpy(previous, image, length);
   return true;
@@ -271,6 +266,30 @@ void GxEPD2_583_FastPartial::invalidateFastMode() {
   _using_partial_mode = false;
   // Make the inherited normal initialization reset before full recovery.
   if (_rst >= 0) _hibernating = true;
+}
+
+bool GxEPD2_583_FastPartial::powerOnFastMode() {
+  if (_power_is_on) return true;
+  _writeCommand(0x04);
+  if (!waitWhileBusyStatus("FastPartialPowerOn", power_on_time)) {
+    invalidateFastMode();
+    return false;
+  }
+  _power_is_on = true;
+  return true;
+}
+
+bool GxEPD2_583_FastPartial::powerOffFastMode() {
+  if (!_power_is_on) return true;
+  _writeCommand(0x02);
+  const bool poweredOff =
+    waitWhileBusyStatus("FastPartialPowerOff", power_off_time);
+  _power_is_on = false;
+  if (!poweredOff) {
+    invalidateFastMode();
+    return false;
+  }
+  return true;
 }
 
 void GxEPD2_583_FastPartial::loadFastLut() {

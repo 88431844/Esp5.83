@@ -8,8 +8,8 @@
 #include <U8g2_for_Adafruit_GFX.h>
 #include <Arduino_SNMP_Manager.h>
 #include <SNMPGet.h>
-#include "GxEPD2_583_FastPartial.h"
 #include "dashboard_model.h"
+#include "GxEPD2_583_DeepBlack.h"
 #include "secrets.h"
 
 // ===== 配置 =====
@@ -19,24 +19,19 @@ const char* PVE_CERT_FINGERPRINT = "32:2A:C0:E1:C4:73:01:56:33:7D:CD:72:5C:19:72
 
 IPAddress nas_ip(192, 168, 31, 105);
 
-constexpr uint32_t NAS_SPEED_REFRESH_INTERVAL_MS = 5000;
-constexpr uint32_t FULL_REFRESH_INTERVAL_MS = 600000;
+constexpr uint32_t FULL_REFRESH_INTERVAL_MS = 3600000;
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 30000;
 constexpr uint32_t FULL_RECOVERY_BACKOFF_MS = 60000;
-constexpr uint32_t NAS_NETWORK_SAMPLE_MAX_AGE_MS = 60000;
 
 // ===== 数据结构 =====
-struct WeatherNow { float temp; int code; int humidity; float wind; };
+struct WeatherNow { float temp; int code; char updated_at[6]; };
 struct HourlyWeather { int hour; float temp; int code; };
-struct DailyWeather { String day; float tMax; float tMin; int code; };
 struct PoolInfo { char name[20]; int status; float used_tb; float total_tb; int pct; };
 
 // ===== 全局数据 =====
 WeatherNow now_weather;
 HourlyWeather hourly[8];
 int hourly_count = 0;
-DailyWeather daily[7];
-int daily_count = 0;
 PveNodeInfo pve_node;
 VMInfo vms[MAX_PVE_VMS];
 int vm_count = 0;
@@ -54,24 +49,17 @@ uint32_t min_free_heap = UINT32_MAX;
 
 // ===== GxEPD2 显示器 =====
 // 将缓冲从全屏(HEIGHT, 33.6KB)改为32行(2.4KB)，解决 OOM 崩溃问题
-GxEPD2_BW<GxEPD2_583_FastPartial, 32> display(
-  GxEPD2_583_FastPartial(15, 0, 2, 4));
+GxEPD2_BW<GxEPD2_583_DeepBlack, 32> display(
+  GxEPD2_583_DeepBlack(15, 0, 2, 4));
 U8G2_FOR_ADAFRUIT_GFX u8g2Fonts;
-GFXcanvas1 nasSpeedCanvas(NAS_SPEED_WIDTH, NAS_SPEED_HEIGHT);
-U8G2_FOR_ADAFRUIT_GFX nasSpeedFont;
-uint8_t previousNasSpeed[NAS_SPEED_BUFFER_SIZE];
-bool nasSpeedPartialReady = false;
-uint32_t lastNetworkRefreshMs = 0;
 uint32_t lastFullRefreshMs = 0;
 uint32_t lastWifiRetryMs = 0;
 uint32_t lastFullAttemptCompletedMs = 0;
 bool displayReady = false;
-bool offlineRatesDisplayed = false;
 bool wifiWasConnected = false;
 bool recoveryPending = false;
 bool dataRefreshPending = false;
 bool fullAttemptRecorded = false;
-bool wifiDisconnectNeedsReseed = false;
 bool wifiReconnectRefreshPending = false;
 volatile bool wifiConnectedObserved = false;
 volatile bool wifiDisconnectEventRaised = false;
@@ -116,7 +104,6 @@ bool latchWiFiDisconnectEvent() {
     Serial.println("WiFi disconnect event ignored while offline/connecting");
   }
   if (!raised) return false;
-  wifiDisconnectNeedsReseed = true;
   return true;
 }
 
@@ -187,10 +174,9 @@ void fetchWeather() {
   http.setTimeout(10000);
   String url = "http://api.open-meteo.com/v1/forecast"
     "?latitude=39.9042&longitude=116.4074"
-    "&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m"
+    "&current=temperature_2m,weather_code"
     "&hourly=temperature_2m,weather_code"
-    "&daily=weather_code,temperature_2m_max,temperature_2m_min"
-    "&timezone=Asia%2FShanghai&forecast_hours=8&forecast_days=7";
+    "&timezone=Asia%2FShanghai&forecast_hours=8";
   if (http.begin(client, url)) {
     int httpCode = http.GET();
     Serial.printf(" HTTP %d\n", httpCode);
@@ -198,17 +184,12 @@ void fetchWeather() {
       String payload = http.getString();
       
       JsonDocument filter;
+      filter["current"]["time"] = true;
       filter["current"]["temperature_2m"] = true;
       filter["current"]["weather_code"] = true;
-      filter["current"]["relative_humidity_2m"] = true;
-      filter["current"]["wind_speed_10m"] = true;
       filter["hourly"]["time"] = true;
       filter["hourly"]["temperature_2m"] = true;
       filter["hourly"]["weather_code"] = true;
-      filter["daily"]["time"] = true;
-      filter["daily"]["weather_code"] = true;
-      filter["daily"]["temperature_2m_max"] = true;
-      filter["daily"]["temperature_2m_min"] = true;
       
       JsonDocument doc;
       DeserializationError error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
@@ -218,45 +199,35 @@ void fetchWeather() {
       } else {
         now_weather.temp     = doc["current"]["temperature_2m"] | 0.0f;
         now_weather.code     = doc["current"]["weather_code"] | 0;
-        now_weather.humidity = doc["current"]["relative_humidity_2m"] | 0;
-        now_weather.wind     = doc["current"]["wind_speed_10m"] | 0.0f;
-        
-        JsonArray time_arr = doc["hourly"]["time"];
-        JsonArray temp_arr = doc["hourly"]["temperature_2m"];
-        JsonArray code_arr = doc["hourly"]["weather_code"];
-        
-        hourly_count = 0;
-        for (size_t i = 0; i < time_arr.size() && hourly_count < 8; i++) {
-          const char* t_str = time_arr[i];
-          if (t_str && strlen(t_str) >= 16) {
-            char hrStr[3] = { t_str[11], t_str[12], '\0' };
-            hourly[hourly_count].hour = atoi(hrStr);
-            hourly[hourly_count].temp = temp_arr[i] | 0.0f;
-            hourly[hourly_count].code = code_arr[i] | 0;
-            hourly_count++;
-          }
+        const char* observedAt = doc["current"]["time"] | "";
+        if (strlen(observedAt) >= 16) {
+          snprintf(now_weather.updated_at, sizeof(now_weather.updated_at),
+                   "%c%c:%c%c", observedAt[11], observedAt[12],
+                   observedAt[14], observedAt[15]);
+        } else if (timeValid) {
+          snprintf(now_weather.updated_at, sizeof(now_weather.updated_at),
+                   "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+        } else {
+          copyText(now_weather.updated_at, sizeof(now_weather.updated_at), "--:--");
         }
-        
-        JsonArray d_time = doc["daily"]["time"];
-        JsonArray d_code = doc["daily"]["weather_code"];
-        JsonArray d_max = doc["daily"]["temperature_2m_max"];
-        JsonArray d_min = doc["daily"]["temperature_2m_min"];
-        
-        daily_count = 0;
-        for (size_t i = 0; i < d_time.size() && daily_count < 7; i++) {
-          const char* t_str = d_time[i];
-          if (t_str && strlen(t_str) >= 10) {
-            String dateStr = String(t_str + 5);
-            dateStr.replace("-", "/");
-            daily[daily_count].day = dateStr;
-            daily[daily_count].code = d_code[i] | 0;
-            daily[daily_count].tMax = d_max[i] | 0.0f;
-            daily[daily_count].tMin = d_min[i] | 0.0f;
-            daily_count++;
-          }
+
+        JsonArray timeArray = doc["hourly"]["time"];
+        JsonArray temperatureArray = doc["hourly"]["temperature_2m"];
+        JsonArray codeArray = doc["hourly"]["weather_code"];
+        hourly_count = 0;
+        for (size_t i = 0; i < timeArray.size() && hourly_count < 8; ++i) {
+          const char* forecastAt = timeArray[i];
+          if (!forecastAt || strlen(forecastAt) < 16) continue;
+          char hourText[3] = {forecastAt[11], forecastAt[12], '\0'};
+          hourly[hourly_count].hour = atoi(hourText);
+          hourly[hourly_count].temp = temperatureArray[i] | 0.0f;
+          hourly[hourly_count].code = codeArray[i] | 0;
+          ++hourly_count;
         }
       }
-      Serial.printf(" %.1fC code=%d %d slots\n", now_weather.temp, now_weather.code, hourly_count);
+      Serial.printf(" %.1fC code=%d updated=%s hourly=%d\n",
+                    now_weather.temp, now_weather.code,
+                    now_weather.updated_at, hourly_count);
     }
     http.end();
       client.stop();
@@ -541,36 +512,16 @@ char g_oidUsed[4][64];
 static WiFiUDP nasUdp;
 static SNMPManager nasSnmp(SNMP_COMMUNITY);
 bool nasCallbacksReady = false;
-bool nasCountersReady = false;
-int nasInterfaceIndex = -1;
-uint64_t nasRxOctets = UINT64_MAX;
-uint64_t nasTxOctets = UINT64_MAX;
-NetworkCounterSample previousNetworkSample = {};
-NetworkRates currentNetworkRates = {};
 ValueCallback* cbUptime = nullptr;
-ValueCallback* cbInterfaceIndex = nullptr;
-ValueCallback* cbRxOctets = nullptr;
-ValueCallback* cbTxOctets = nullptr;
 ValueCallback* cbName[4] = {};
 ValueCallback* cbAlloc[4] = {};
 ValueCallback* cbTotal[4] = {};
 ValueCallback* cbUsed[4] = {};
-char oidInterfaceIndex[64];
-char oidRxOctets[64];
-char oidTxOctets[64];
-int nasCounterInterfaceIndex = -1;
-uint8_t nasCounterFailureCount = 0;
-uint32_t nasLastInterfaceDiscoveryAt = 0;
 uint32_t nasRequestGeneration = 0;
 
 static const size_t MAX_NAS_REQUEST_CALLBACKS = 4;
-static const uint8_t NAS_FAILURES_BEFORE_REDISCOVERY = 3;
-static const uint32_t NAS_INTERFACE_REDISCOVERY_INTERVAL_MS = 300000;
 static const uint16_t NAS_REQUEST_PORT_BASE = 49152;
 static const uint16_t NAS_REQUEST_PORT_COUNT = 16384;
-static constexpr char ipAdEntIfIndex[] = ".1.3.6.1.2.1.4.20.1.2";
-static constexpr char ifHCInOctets[] = ".1.3.6.1.2.1.31.1.1.1.6";
-static constexpr char ifHCOutOctets[] = ".1.3.6.1.2.1.31.1.1.1.10";
 
 bool consumeWiFiDisconnectEvent(const char* checkpoint) {
   if (!latchWiFiDisconnectEvent()) return false;
@@ -578,14 +529,9 @@ bool consumeWiFiDisconnectEvent(const char* checkpoint) {
   wifiWasConnected = false;
   wifiReconnectRefreshPending = true;
   dataRefreshPending = true;
-  previousNetworkSample = {};
-  currentNetworkRates = {};
-  if (nasCounterFailureCount < NAS_FAILURES_BEFORE_REDISCOVERY) {
-    nasCounterFailureCount = NAS_FAILURES_BEFORE_REDISCOVERY;
-  }
   lastWifiRetryMs = wifiRetryAnchorAfterDisconnectEvent(
     lastWifiRetryMs, millis(), true);
-  Serial.printf("WiFi disconnect event at %s; NAS baseline invalidated\n",
+  Serial.printf("WiFi disconnect event at %s; full refresh scheduled\n",
     checkpoint ? checkpoint : "unspecified");
   return true;
 }
@@ -1265,162 +1211,7 @@ void initializeNASCallbacks() {
     cbUsed[i] = nasSnmp.addIntegerHandler(nas_ip, g_oidUsed[i], &g_volUsed[i]);
   }
 
-  snprintf(oidInterfaceIndex, sizeof(oidInterfaceIndex),
-    "%s.%u.%u.%u.%u", ipAdEntIfIndex,
-    static_cast<unsigned int>(nas_ip[0]),
-    static_cast<unsigned int>(nas_ip[1]),
-    static_cast<unsigned int>(nas_ip[2]),
-    static_cast<unsigned int>(nas_ip[3]));
-  cbInterfaceIndex = nasSnmp.addIntegerHandler(
-    nas_ip, oidInterfaceIndex, &nasInterfaceIndex);
   nasCallbacksReady = true;
-}
-
-char* allocateNASOID(const char* oid) {
-  const size_t length = strlen(oid) + 1;
-  char* value = static_cast<char*>(malloc(length));
-  if (value != nullptr) memcpy(value, oid, length);
-  return value;
-}
-
-bool configureNASCounterCallbacks(int interfaceIndex) {
-  char nextRxOID[sizeof(oidRxOctets)];
-  char nextTxOID[sizeof(oidTxOctets)];
-  snprintf(nextRxOID, sizeof(nextRxOID),
-    "%s.%d", ifHCInOctets, interfaceIndex);
-  snprintf(nextTxOID, sizeof(nextTxOID),
-    "%s.%d", ifHCOutOctets, interfaceIndex);
-
-  if (!nasCountersReady) {
-    copyText(oidRxOctets, sizeof(oidRxOctets), nextRxOID);
-    copyText(oidTxOctets, sizeof(oidTxOctets), nextTxOID);
-    cbRxOctets = nasSnmp.addCounter64Handler(
-      nas_ip, oidRxOctets, &nasRxOctets);
-    cbTxOctets = nasSnmp.addCounter64Handler(
-      nas_ip, oidTxOctets, &nasTxOctets);
-    nasCounterInterfaceIndex = interfaceIndex;
-    nasCountersReady = true;
-    previousNetworkSample = {};
-    currentNetworkRates = {};
-    return true;
-  }
-
-  if (interfaceIndex == nasCounterInterfaceIndex) return true;
-  if (cbRxOctets == nullptr || cbTxOctets == nullptr) return false;
-
-  char* replacementRxOID = allocateNASOID(nextRxOID);
-  char* replacementTxOID = allocateNASOID(nextTxOID);
-  if (replacementRxOID == nullptr || replacementTxOID == nullptr) {
-    free(replacementRxOID);
-    free(replacementTxOID);
-    return false;
-  }
-
-  free(cbRxOctets->OID);
-  free(cbTxOctets->OID);
-  cbRxOctets->OID = replacementRxOID;
-  cbTxOctets->OID = replacementTxOID;
-  copyText(oidRxOctets, sizeof(oidRxOctets), nextRxOID);
-  copyText(oidTxOctets, sizeof(oidTxOctets), nextTxOID);
-  nasCounterInterfaceIndex = interfaceIndex;
-  previousNetworkSample = {};
-  currentNetworkRates = {};
-  return true;
-}
-
-bool discoverNASInterface() {
-  initializeNASCallbacks();
-  const int previousInterfaceIndex = nasCounterInterfaceIndex;
-  nasInterfaceIndex = -1;
-  ValueCallback* callbacks[] = {cbInterfaceIndex};
-  if (!requestNAS(callbacks, 1, 2000, 1000) || nasInterfaceIndex <= 0) {
-    nasInterfaceIndex = previousInterfaceIndex;
-    Serial.println("NAS interface discovery FAILED");
-    return false;
-  }
-
-  const int discoveredInterfaceIndex = nasInterfaceIndex;
-  if (!configureNASCounterCallbacks(discoveredInterfaceIndex)) {
-    nasInterfaceIndex = previousInterfaceIndex;
-    Serial.println("NAS counter callback configuration FAILED");
-    return false;
-  }
-
-  nasLastInterfaceDiscoveryAt = millis();
-  nasCounterFailureCount = 0;
-  if (previousInterfaceIndex > 0 &&
-      discoveredInterfaceIndex != previousInterfaceIndex) {
-    Serial.printf("NAS interface changed %d -> %d\n",
-      previousInterfaceIndex, discoveredInterfaceIndex);
-  } else {
-    Serial.printf("NAS interface index=%d\n", discoveredInterfaceIndex);
-  }
-  return true;
-}
-
-bool sampleNASNetwork() {
-  const uint32_t requestStartedAt = millis();
-  if (shouldInvalidateNetworkSample(
-        previousNetworkSample, requestStartedAt,
-        NAS_NETWORK_SAMPLE_MAX_AGE_MS, nasCounterFailureCount,
-        NAS_FAILURES_BEFORE_REDISCOVERY)) {
-    previousNetworkSample = {};
-    currentNetworkRates = {};
-    Serial.println("NAS network baseline stale; reseeding");
-  }
-
-  const bool rediscoveryDue = nasCountersReady &&
-    intervalElapsed(millis(), nasLastInterfaceDiscoveryAt,
-                    NAS_INTERFACE_REDISCOVERY_INTERVAL_MS);
-  if ((!nasCountersReady ||
-       nasCounterFailureCount >= NAS_FAILURES_BEFORE_REDISCOVERY ||
-       rediscoveryDue) &&
-      !discoverNASInterface()) {
-    currentNetworkRates = {};
-    return false;
-  }
-
-  nasRxOctets = UINT64_MAX;
-  nasTxOctets = UINT64_MAX;
-  ValueCallback* callbacks[] = {cbRxOctets, cbTxOctets};
-  if (!requestNAS(callbacks, 2, 2100, 1000)) {
-    currentNetworkRates = {};
-    if (nasCounterFailureCount < UINT8_MAX) ++nasCounterFailureCount;
-    if (shouldInvalidateNetworkSample(
-          previousNetworkSample, millis(),
-          NAS_NETWORK_SAMPLE_MAX_AGE_MS, nasCounterFailureCount,
-          NAS_FAILURES_BEFORE_REDISCOVERY)) {
-      previousNetworkSample = {};
-      Serial.println("NAS network baseline invalidated after failures");
-    }
-    Serial.printf("NAS network sample FAILED (%u/%u)\n",
-      static_cast<unsigned int>(nasCounterFailureCount),
-      static_cast<unsigned int>(NAS_FAILURES_BEFORE_REDISCOVERY));
-    return false;
-  }
-
-  // Timestamp after the verified response so it reflects this counter sample.
-  const NetworkCounterSample sample = {
-    nasRxOctets, nasTxOctets, millis(), true
-  };
-  NetworkRates rates = {};
-  calculateNetworkRates(previousNetworkSample, sample, rates);
-  previousNetworkSample = sample;
-  currentNetworkRates = rates;
-  nasCounterFailureCount = 0;
-  if (wifiDisconnectNeedsReseed && previousNetworkSample.valid) {
-    wifiDisconnectNeedsReseed = false;
-    Serial.println("NAS network baseline reseeded after WiFi disconnect");
-  }
-
-  Serial.printf(
-    "NAS network rx=%llu tx=%llu rx_rate=%llu tx_rate=%llu valid=%d\n",
-    static_cast<unsigned long long>(nasRxOctets),
-    static_cast<unsigned long long>(nasTxOctets),
-    static_cast<unsigned long long>(currentNetworkRates.rx_bytes_per_second),
-    static_cast<unsigned long long>(currentNetworkRates.tx_bytes_per_second),
-    currentNetworkRates.valid ? 1 : 0);
-  return currentNetworkRates.valid;
 }
 
 void fetchNAS() {
@@ -1497,13 +1288,13 @@ void fetchNAS() {
 
 // ===== 渲染 =====
 char getWeatherChar(int code) {
-  if (code == 0) return 'S'; // Sun
-  if (code >= 1 && code <= 3) return 'C'; // Cloud
-  if (code >= 45 && code <= 48) return 'F'; // Fog
-  if (code >= 51 && code <= 67) return 'R'; // Rain
-  if (code >= 71 && code <= 77) return 'W'; // Snow
-  if (code >= 80 && code <= 82) return 'H'; // Shower
-  if (code >= 95) return 'T'; // Storm
+  if (code == 0) return 'S';
+  if (code >= 1 && code <= 3) return 'C';
+  if (code >= 45 && code <= 48) return 'F';
+  if (code >= 51 && code <= 67) return 'R';
+  if (code >= 71 && code <= 77) return 'W';
+  if (code >= 80 && code <= 82) return 'H';
+  if (code >= 95) return 'T';
   return '?';
 }
 
@@ -1518,6 +1309,11 @@ void drawChineseHeader(int x, int y, int w, const char* title) {
   u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
   u8g2Fonts.drawUTF8(x + 5, y + 20, title);
   display.drawLine(x, y + 28, x + w, y + 28, GxEPD_BLACK);
+}
+
+void drawBoldUTF8(int x, int baselineY, const char* text) {
+  u8g2Fonts.drawUTF8(x, baselineY, text);
+  u8g2Fonts.drawUTF8(x + 1, baselineY, text);
 }
 
 void drawCalendar(int x, int y, int w, int h) {
@@ -1567,136 +1363,102 @@ void drawCalendar(int x, int y, int w, int h) {
     if (day == timeinfo.tm_mday) {
       display.fillRect(
         cellX + 2, cellY + 2, cellW - 4, cellH - 4, GxEPD_BLACK);
+      u8g2Fonts.setFontMode(0);
       u8g2Fonts.setForegroundColor(GxEPD_WHITE);
+      u8g2Fonts.setBackgroundColor(GxEPD_BLACK);
     }
     u8g2Fonts.drawUTF8(text.x, text.baseline_y, dayText);
     if (day == timeinfo.tm_mday) {
+      u8g2Fonts.setFontMode(1);
       u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+      u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
     }
   }
 }
 
 void drawWeather(int x, int y, int w, int h) {
   char header[48] = {};
-  if (timeValid) {
-    formatChineseWeatherHeader(
-      timeinfo.tm_mon + 1, timeinfo.tm_mday, header, sizeof(header));
-  } else {
-    snprintf(header, sizeof(header), "今天天气");
-  }
-  drawChineseHeader(x, y, w, header);
-
-  char buf[80] = {};
-  formatChineseWeatherSummary(
-    now_weather.temp, now_weather.humidity, now_weather.wind,
-    buf, sizeof(buf));
+  formatChineseWeatherHeader(header, sizeof(header));
   u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
-  u8g2Fonts.drawUTF8(x + 5, y + 49, buf);
-  u8g2Fonts.setFont(u8g2_font_helvR08_tf);
-  
-  // -- 8小时预报折线图 (高度区间 y+55 到 y+128) --
-  if (hourly_count > 0) {
-    float minT = hourly[0].temp, maxT = hourly[0].temp;
-    for (int i=1; i<hourly_count; i++) {
-      if (hourly[i].temp < minT) minT = hourly[i].temp;
-      if (hourly[i].temp > maxT) maxT = hourly[i].temp;
-    }
-    if (maxT - minT < 1.0f) { maxT += 1.0f; minT -= 1.0f; }
-    
-    int cY = y + 55;
-    int cH = 73;
-    int padT = 15;
-    int padB = 15;
-    int innerH = cH - padT - padB;
-    int stepX = w / hourly_count;
-    int offX = x + stepX / 2;
-    
-    for (int i=0; i<hourly_count-1; i++) {
-      int x1 = offX + i*stepX;
-      int y1 = cY + padT + innerH - (int)((hourly[i].temp - minT)/(maxT - minT)*innerH);
-      int x2 = offX + (i+1)*stepX;
-      int y2 = cY + padT + innerH - (int)((hourly[i+1].temp - minT)/(maxT - minT)*innerH);
-      display.drawLine(x1, y1, x2, y2, GxEPD_BLACK);
-    }
-    
-    for (int i=0; i<hourly_count; i++) {
-      int px = offX + i*stepX;
-      int py = cY + padT + innerH - (int)((hourly[i].temp - minT)/(maxT - minT)*innerH);
-      display.fillCircle(px, py, 2, GxEPD_BLACK);
-      
-      sprintf(buf, "%.0f", hourly[i].temp);
-      u8g2Fonts.setCursor(px - 5, py - 4);
-      u8g2Fonts.print(buf);
-      
-      char icon = getWeatherChar(hourly[i].code);
-      u8g2Fonts.setCursor(px - 3, cY + 12);
-      u8g2Fonts.print(icon);
-      
-      sprintf(buf, "%02d", hourly[i].hour);
-      u8g2Fonts.setCursor(px - 5, cY + cH - 2);
-      u8g2Fonts.print(buf);
-    }
+  drawBoldUTF8(x + 5, y + 20, header);
+  char updateHeader[24] = {};
+  snprintf(updateHeader, sizeof(updateHeader), "更新时间 %s",
+           now_weather.updated_at[0] ? now_weather.updated_at : "--:--");
+  const int updateWidth = u8g2Fonts.getUTF8Width(updateHeader) + 1;
+  drawBoldUTF8(x + w - updateWidth - 5, y + 20, updateHeader);
+  display.drawLine(x, y + 28, x + w, y + 28, GxEPD_BLACK);
+
+  const char* condition = chineseWeatherCondition(now_weather.code);
+  char temperature[20] = {};
+  snprintf(temperature, sizeof(temperature), "%.1f°C", now_weather.temp);
+  u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
+  const int conditionWidth = u8g2Fonts.getUTF8Width(condition) + 1;
+  u8g2Fonts.setFont(u8g2_font_helvB14_tf);
+  const int temperatureWidth = u8g2Fonts.getUTF8Width(temperature);
+  const int summaryX = x + (w - conditionWidth - 8 - temperatureWidth) / 2;
+  u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
+  drawBoldUTF8(summaryX, y + 53, condition);
+  u8g2Fonts.setFont(u8g2_font_helvB14_tf);
+  u8g2Fonts.setCursor(summaryX + conditionWidth + 8, y + 53);
+  u8g2Fonts.print(temperature);
+  display.drawLine(x, y + 59, x + w, y + 59, GxEPD_BLACK);
+
+  if (hourly_count <= 0) return;
+
+  float minTemperature = hourly[0].temp;
+  float maxTemperature = hourly[0].temp;
+  for (int i = 1; i < hourly_count; ++i) {
+    minTemperature = min(minTemperature, hourly[i].temp);
+    maxTemperature = max(maxTemperature, hourly[i].temp);
   }
-  
-  // 画一条横线分隔 8 小时预报和 7 天预报
-  display.drawLine(x, y + 128, x + w, y + 128, GxEPD_BLACK);
-  
-  // -- 7天预报折线图 (高度区间 y+135 到 y+224) --
-  if (daily_count > 0) {
-    float minT = daily[0].tMin, maxT = daily[0].tMax;
-    for (int i=1; i<daily_count; i++) {
-      if (daily[i].tMin < minT) minT = daily[i].tMin;
-      if (daily[i].tMax > maxT) maxT = daily[i].tMax;
-    }
-    if (maxT - minT < 1.0f) { maxT += 1.0f; minT -= 1.0f; }
-    
-    int cY = y + 130;
-    int cH = 94; 
-    int padT = 15;
-    int padB = 25; 
-    int innerH = cH - padT - padB;
-    int stepX = w / daily_count;
-    int offX = x + stepX / 2;
-    
-    for(int i=0; i<daily_count-1; i++) {
-      int x1 = offX + i*stepX;
-      int y1 = cY + padT + innerH - (int)((daily[i].tMax - minT)/(maxT - minT)*innerH);
-      int x2 = offX + (i+1)*stepX;
-      int y2 = cY + padT + innerH - (int)((daily[i+1].tMax - minT)/(maxT - minT)*innerH);
-      display.drawLine(x1, y1, x2, y2, GxEPD_BLACK);
-    }
-    
-    for(int i=0; i<daily_count-1; i++) {
-      int x1 = offX + i*stepX;
-      int y1 = cY + padT + innerH - (int)((daily[i].tMin - minT)/(maxT - minT)*innerH);
-      int x2 = offX + (i+1)*stepX;
-      int y2 = cY + padT + innerH - (int)((daily[i+1].tMin - minT)/(maxT - minT)*innerH);
-      display.drawLine(x1, y1, x2, y2, GxEPD_BLACK);
-    }
-    
-    for(int i=0; i<daily_count; i++) {
-      int px = offX + i*stepX;
-      int pyMax = cY + padT + innerH - (int)((daily[i].tMax - minT)/(maxT - minT)*innerH);
-      int pyMin = cY + padT + innerH - (int)((daily[i].tMin - minT)/(maxT - minT)*innerH);
-      
-      display.fillCircle(px, pyMax, 2, GxEPD_BLACK);
-      display.fillCircle(px, pyMin, 2, GxEPD_BLACK);
-      
-      sprintf(buf, "%.0f", daily[i].tMax);
-      u8g2Fonts.setCursor(px - 5, pyMax - 4);
-      u8g2Fonts.print(buf);
-      
-      sprintf(buf, "%.0f", daily[i].tMin);
-      u8g2Fonts.setCursor(px - 5, pyMin + 10);
-      u8g2Fonts.print(buf);
-      
-      char icon = getWeatherChar(daily[i].code);
-      u8g2Fonts.setCursor(px - 3, cY + 12);
-      u8g2Fonts.print(icon);
-      
-      u8g2Fonts.setCursor(px - 10, cY + cH - 2);
-      u8g2Fonts.print(daily[i].day);
-    }
+  if (maxTemperature - minTemperature < 1.0f) {
+    maxTemperature += 1.0f;
+    minTemperature -= 1.0f;
+  }
+
+  const int chartTop = y + 60;
+  const int chartHeight = h - 60;
+  const int plotTop = chartTop + 35;
+  const int plotHeight = chartHeight - 65;
+  const int stepX = w / hourly_count;
+  const int firstX = x + stepX / 2;
+
+  for (int i = 0; i < hourly_count - 1; ++i) {
+    const int x1 = firstX + i * stepX;
+    const int y1 = plotTop + plotHeight - static_cast<int>(
+      (hourly[i].temp - minTemperature) /
+      (maxTemperature - minTemperature) * plotHeight);
+    const int x2 = firstX + (i + 1) * stepX;
+    const int y2 = plotTop + plotHeight - static_cast<int>(
+      (hourly[i + 1].temp - minTemperature) /
+      (maxTemperature - minTemperature) * plotHeight);
+    display.drawLine(x1, y1, x2, y2, GxEPD_BLACK);
+  }
+
+  u8g2Fonts.setFont(u8g2_font_helvB08_tf);
+  for (int i = 0; i < hourly_count; ++i) {
+    const int pointX = firstX + i * stepX;
+    const int pointY = plotTop + plotHeight - static_cast<int>(
+      (hourly[i].temp - minTemperature) /
+      (maxTemperature - minTemperature) * plotHeight);
+    display.fillCircle(pointX, pointY, 2, GxEPD_BLACK);
+
+    char label[12] = {};
+    snprintf(label, sizeof(label), "%.0f", hourly[i].temp);
+    u8g2Fonts.setCursor(
+      pointX - u8g2Fonts.getUTF8Width(label) / 2, pointY - 4);
+    u8g2Fonts.print(label);
+
+    const char weatherSymbol[2] = {getWeatherChar(hourly[i].code), '\0'};
+    u8g2Fonts.setCursor(
+      pointX - u8g2Fonts.getUTF8Width(weatherSymbol) / 2, chartTop + 14);
+    u8g2Fonts.print(weatherSymbol);
+
+    snprintf(label, sizeof(label), "%02d", hourly[i].hour);
+    u8g2Fonts.setCursor(
+      pointX - u8g2Fonts.getUTF8Width(label) / 2,
+      chartTop + chartHeight - 5);
+    u8g2Fonts.print(label);
   }
 }
 
@@ -1704,57 +1466,60 @@ void drawPVE(int x, int y, int w, int h) {
   char title[32];
   snprintf(title, sizeof(title), "PVE %s", pve_node.name);
   drawHeader(x, y, w, title);
-  u8g2Fonts.setFont(u8g2_font_helvR08_tf);
-
-  u8g2Fonts.setCursor(x + 18, y + 41);
-  u8g2Fonts.print("VM");
-  u8g2Fonts.setCursor(x + 92, y + 41);
+  u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
+  drawBoldUTF8(x + 18, y + 43, "虚拟机");
+  drawBoldUTF8(x + 176, y + 43, "核心数");
+  drawBoldUTF8(x + 246, y + 43, "内存");
+  u8g2Fonts.setFont(u8g2_font_helvB08_tf);
+  u8g2Fonts.setCursor(x + 120, y + 41);
   u8g2Fonts.print("IP");
-  u8g2Fonts.setCursor(x + 196, y + 41);
-  u8g2Fonts.print("C");
-  u8g2Fonts.setCursor(x + 220, y + 41);
-  u8g2Fonts.print("MEM");
   display.drawLine(x, y + 45, x + w, y + 45, GxEPD_BLACK);
 
   const int visible = min(vm_count, static_cast<int>(MAX_VISIBLE_PVE_VMS));
+  u8g2Fonts.setFont(u8g2_font_helvB10_tf);
   for (int i = 0; i < visible; i++) {
-    int cy = y + 62 + i * 20;
+    const int rowTop = y + 46 + i * (h - 46) / MAX_VISIBLE_PVE_VMS;
+    const int rowBottom = y + 46 + (i + 1) * (h - 46) / MAX_VISIBLE_PVE_VMS;
+    const TextPlacement rowText = centerTextInRect(
+      0, rowTop, 0, rowBottom - rowTop, 0,
+      u8g2Fonts.getFontAscent(), u8g2Fonts.getFontDescent());
+    const int cy = rowText.baseline_y;
     if (vms[i].running) {
       display.fillCircle(x + 8, cy - 4, 3, GxEPD_BLACK);
     } else {
       display.drawCircle(x + 8, cy - 4, 3, GxEPD_BLACK);
     }
 
-    char name[13];
+    char name[12];
     copyText(name, sizeof(name), vms[i].name);
     u8g2Fonts.setCursor(x + 18, cy);
     u8g2Fonts.print(name);
-    u8g2Fonts.setCursor(x + 92, cy);
+    u8g2Fonts.setCursor(x + 82, cy);
     u8g2Fonts.print(vms[i].ip);
-    u8g2Fonts.setCursor(x + 196, cy);
+    u8g2Fonts.setCursor(x + 194, cy);
     u8g2Fonts.print(vms[i].cpus);
 
     char buf[20];
     const float usedGb = bytesToGiB(vms[i].mem_bytes);
     const float totalGb = bytesToGiB(vms[i].maxmem_bytes);
     snprintf(buf, sizeof(buf), "%.1f/%.1fG", usedGb, totalGb);
-    u8g2Fonts.setCursor(x + 220, cy);
+    u8g2Fonts.setCursor(x + 224, cy);
     u8g2Fonts.print(buf);
   }
 }
 
 void drawNAS(int x, int y, int w, int h) {
   drawHeader(x, y, w, "Synology NAS");
-  int startY = y + 45;
-  
-  u8g2Fonts.setFont(u8g2_font_helvR08_tf);
+  const int rows = max(pool_count, 1);
+  const int contentTop = y + 29;
+  const int contentHeight = h - 29;
+
   for (int i = 0; i < pool_count; i++) {
-    int cy = startY + i * 40;
-    
-    u8g2Fonts.setCursor(x + 10, cy);
-    u8g2Fonts.print(pools[i].name);
-    
-    char buf[40];
+    const int rowTop = contentTop + i * contentHeight / rows;
+    const int rowBottom = contentTop + (i + 1) * contentHeight / rows;
+    const int baseline = rowTop + min(18, rowBottom - rowTop - 16);
+
+    char buf[64];
     char usedStr[16], totalStr[16], freeStr[16];
     
     if (pools[i].used_tb < 1.0) sprintf(usedStr, "%.0fG", pools[i].used_tb * 1024);
@@ -1767,16 +1532,23 @@ void drawNAS(int x, int y, int w, int h) {
     if (free_tb < 1.0) sprintf(freeStr, "%.0fG", free_tb * 1024);
     else sprintf(freeStr, "%.1fT", free_tb);
     
-    sprintf(buf, "%s/%s Free:%s", usedStr, totalStr, freeStr);
-    
-    // 右对齐文本
-    int tw = u8g2Fonts.getUTF8Width(buf);
-    u8g2Fonts.setCursor(x + w - tw - 10, cy);
-    u8g2Fonts.print(buf);
-    
-    display.drawRect(x + 10, cy + 5, w - 20, 10, GxEPD_BLACK);
+    snprintf(buf, sizeof(buf), "已用%s 可用%s 总共%s",
+             usedStr, freeStr, totalStr);
+
+    u8g2Fonts.setFont(u8g2_font_helvB10_tf);
+    u8g2Fonts.setCursor(x + 8, baseline);
+    char poolName[9];
+    copyText(poolName, sizeof(poolName), pools[i].name);
+    u8g2Fonts.print(poolName);
+
+    u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
+    const int textWidth = u8g2Fonts.getUTF8Width(buf) + 1;
+    drawBoldUTF8(x + w - textWidth - 8, baseline, buf);
+
+    const int barY = min(rowTop + 24, rowBottom - 11);
+    display.drawRect(x + 8, barY, w - 16, 10, GxEPD_BLACK);
     int barW = (w - 24) * pools[i].pct / 100;
-    display.fillRect(x + 12, cy + 7, barW, 6, GxEPD_BLACK);
+    display.fillRect(x + 10, barY + 2, barW, 6, GxEPD_BLACK);
   }
 }
 
@@ -1784,95 +1556,49 @@ void drawNAS(int x, int y, int w, int h) {
 
 void drawPVEBottomBar() {
   display.fillRect(0, 416, 300, 32, GxEPD_WHITE);
+  display.drawLine(100, 416, 100, 447, GxEPD_BLACK);
 
-  u8g2Fonts.setFont(u8g2_font_helvR08_tf);
   u8g2Fonts.setForegroundColor(GxEPD_BLACK);
   u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
-  u8g2Fonts.setCursor(10, 436);
-  u8g2Fonts.printf("IP:%s", pve_node.ip);
+  u8g2Fonts.setFont(u8g2_font_helvB08_tf);
+  u8g2Fonts.setCursor(6, 428);
+  u8g2Fonts.print("IP");
+  u8g2Fonts.setFont(u8g2_font_helvB10_tf);
+  u8g2Fonts.setCursor(6, 444);
+  u8g2Fonts.print(pve_node.ip);
 
   const float usedGb = bytesToGiB(pve_node.mem_bytes);
   const float totalGb = bytesToGiB(pve_node.maxmem_bytes);
   const uint8_t pct = memoryPercent(pve_node.mem_bytes, pve_node.maxmem_bytes);
-  u8g2Fonts.setCursor(132, 436);
-  u8g2Fonts.printf("Mem:%.1f/%.1fG %u%%", usedGb, totalGb, pct);
+  u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
+  drawBoldUTF8(106, 431, "内存使用");
+  u8g2Fonts.setFont(u8g2_font_helvB08_tf);
+  u8g2Fonts.setCursor(174, 430);
+  u8g2Fonts.printf("%.1f/%.1fG %u%%", usedGb, totalGb, pct);
+  display.drawRect(105, 435, 190, 10, GxEPD_BLACK);
+  const int usedWidth = 186 * pct / 100;
+  display.fillRect(107, 437, usedWidth, 6, GxEPD_BLACK);
 }
 
 void drawNASBottomBar() {
   display.fillRect(301, 416, 299, 32, GxEPD_WHITE);
   display.drawLine(300, 416, 300, 447, GxEPD_BLACK);
-  display.drawLine(452, 416, 452, 447, GxEPD_BLACK);
 
-  u8g2Fonts.setFont(u8g2_font_helvR08_tf);
   u8g2Fonts.setForegroundColor(GxEPD_BLACK);
   u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
-
-  u8g2Fonts.setCursor(308, 428);
+  u8g2Fonts.setFont(u8g2_font_helvB10_tf);
+  u8g2Fonts.setCursor(308, 440);
   u8g2Fonts.print("IP:192.168.31.105");
 
   const uint32_t days = g_sysUptime / (100UL * 60 * 60 * 24);
-  u8g2Fonts.setCursor(308, 444);
-  u8g2Fonts.printf("Up:%lu d", static_cast<unsigned long>(days));
-
-  char upload[32];
-  char download[32];
-  formatNetworkRateLines(currentNetworkRates, upload, sizeof(upload),
-                         download, sizeof(download));
-  u8g2Fonts.setCursor(NAS_SPEED_X + 4, 428);
-  u8g2Fonts.print(upload);
-  u8g2Fonts.setCursor(NAS_SPEED_X + 4, 444);
-  u8g2Fonts.print(download);
-}
-
-void renderNASSpeedCanvas() {
-  nasSpeedCanvas.fillScreen(1);
-  nasSpeedFont.setFontMode(0);
-  nasSpeedFont.setFontDirection(0);
-  nasSpeedFont.setForegroundColor(0);
-  nasSpeedFont.setBackgroundColor(1);
-  nasSpeedFont.setFont(u8g2_font_helvR08_tf);
-
-  char upload[32];
-  char download[32];
-  formatNetworkRateLines(currentNetworkRates, upload, sizeof(upload),
-                         download, sizeof(download));
-  nasSpeedFont.setCursor(4, 13);
-  nasSpeedFont.print(upload);
-  nasSpeedFont.setCursor(4, 29);
-  nasSpeedFont.print(download);
-}
-
-bool refreshNASSpeedWindow() {
-  if (!nasSpeedPartialReady) {
-    Serial.printf("NAS speed partial not ready heap=%u\n", ESP.getFreeHeap());
-    return false;
-  }
-  renderNASSpeedCanvas();
-  const uint32_t started = millis();
-  const bool ok = display.epd2.refreshWindow(
-    nasSpeedCanvas.getBuffer(), previousNasSpeed,
-    sizeof(previousNasSpeed), NAS_SPEED_X, NAS_SPEED_Y,
-    NAS_SPEED_WIDTH, NAS_SPEED_HEIGHT);
-  Serial.printf("NAS speed partial ok=%d ms=%lu heap=%u\n", ok,
-    static_cast<unsigned long>(millis() - started), ESP.getFreeHeap());
-  if (!ok) nasSpeedPartialReady = false;
-  return ok;
-}
-
-bool resumePartialModeAfterFullRefresh() {
-  nasSpeedPartialReady = false;
-  renderNASSpeedCanvas();
-  memcpy(previousNasSpeed, nasSpeedCanvas.getBuffer(),
-    sizeof(previousNasSpeed));
-  const bool ready = display.epd2.beginFastMode();
-  nasSpeedPartialReady = ready;
-  Serial.printf("NAS speed partial mode ok=%d heap=%u\n",
-    nasSpeedPartialReady, ESP.getFreeHeap());
-  return nasSpeedPartialReady;
+  char runtime[32] = {};
+  snprintf(runtime, sizeof(runtime), "运行时间%lu天",
+           static_cast<unsigned long>(days));
+  u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
+  drawBoldUTF8(592 - u8g2Fonts.getUTF8Width(runtime), 441, runtime);
 }
 
 bool renderAll() {
-  display.epd2.prepareFullRefresh();
   display.setFullWindow();
   display.firstPage();
   do {
@@ -1894,7 +1620,26 @@ bool renderAll() {
     drawPVEBottomBar();
     drawNASBottomBar();
   } while (display.nextPage());
-  return display.epd2.lastFullRefreshSucceeded();
+  return true;
+}
+
+void renderSolidScreen(uint16_t color, const char* label) {
+  Serial.printf("Panel conditioning %s\n", label);
+  display.setFullWindow();
+  display.firstPage();
+  do {
+    display.fillScreen(color);
+  } while (display.nextPage());
+  delay(1000);
+}
+
+void conditionPanelBeforeDashboard() {
+  // Finish conditioning on white so dashboard black pixels make an explicit
+  // white-to-black transition during the following full refresh. Starting the
+  // dashboard directly from black can leave black-to-black pixels looking weak.
+  renderSolidScreen(GxEPD_WHITE, "WHITE");
+  renderSolidScreen(GxEPD_BLACK, "BLACK");
+  renderSolidScreen(GxEPD_WHITE, "FINAL WHITE");
 }
 
 bool fullRefreshGuardOpen(uint32_t now) {
@@ -1917,7 +1662,6 @@ bool updateWiFiContinuity(bool stayedConnected, const char* checkpoint) {
 bool refreshFullDashboard(const char* reason) {
   Serial.printf("Full refresh reason=%s\n", reason ? reason : "unspecified");
   displayReady = false;
-  nasSpeedPartialReady = false;
   const bool wifiConnectedAtStart = WiFi.status() == WL_CONNECTED;
   if (wifiConnectedAtStart) markWiFiConnectedObserved();
   bool wifiStayedConnected = wifiConnectedAtStart;
@@ -1937,42 +1681,25 @@ bool refreshFullDashboard(const char* reason) {
   wifiStayedConnected = updateWiFiContinuity(
     wifiStayedConnected, "after-nas");
 
-  const bool wifiConnectedAfterFetch = WiFi.status() == WL_CONNECTED;
   if (wifiConnectedAtStart && !wifiStayedConnected) {
-    previousNetworkSample = {};
-    currentNetworkRates = {};
-    if (nasCounterFailureCount < NAS_FAILURES_BEFORE_REDISCOVERY) {
-      nasCounterFailureCount = NAS_FAILURES_BEFORE_REDISCOVERY;
-    }
-    Serial.println("WiFi lost during full refresh; NAS baseline invalidated");
+    Serial.println("WiFi lost during full refresh");
   }
 
-  if (shouldInvalidateNetworkSample(
-        previousNetworkSample, millis(), NAS_NETWORK_SAMPLE_MAX_AGE_MS,
-        nasCounterFailureCount, NAS_FAILURES_BEFORE_REDISCOVERY)) {
-    previousNetworkSample = {};
-    currentNetworkRates = {};
-    Serial.println("NAS network baseline expired during full refresh");
-  }
-
-  if (wifiConnectedAfterFetch && !previousNetworkSample.valid) {
-    Serial.println("NAS network baseline seed");
-    sampleNASNetwork();
+  if (reason != nullptr && strcmp(reason, "startup") == 0) {
+    conditionPanelBeforeDashboard();
   }
 
   const bool fullRenderOk = renderAll();
   if (!fullRenderOk) {
     updateWiFiContinuity(wifiStayedConnected, "after-full-render");
-    lastNetworkRefreshMs = millis();
     Serial.printf("Full refresh FAILED reason=%s\n",
       reason ? reason : "unspecified");
     logHeap("full failed");
     return false;
   }
 
-  displayReady = resumePartialModeAfterFullRefresh();
+  displayReady = true;
   updateWiFiContinuity(wifiStayedConnected, "after-full-render");
-  lastNetworkRefreshMs = millis();
   Serial.printf("Full refresh complete reason=%s ready=%d\n",
     reason ? reason : "unspecified", displayReady ? 1 : 0);
   logHeap("full refresh");
@@ -2004,8 +1731,6 @@ bool attemptFullDashboard(const char* reason, bool resetPeriodicSchedule) {
 
 bool recoverCachedDashboard(const char* reason) {
   displayReady = false;
-  nasSpeedPartialReady = false;
-  currentNetworkRates = {};
   recoveryPending = true;
   if (WiFi.status() == WL_CONNECTED) markWiFiConnectedObserved();
 
@@ -2026,14 +1751,13 @@ bool recoverCachedDashboard(const char* reason) {
 
   bool ok = false;
   if (fullRenderOk) {
-    displayReady = resumePartialModeAfterFullRefresh();
-    ok = displayReady;
+    displayReady = true;
+    ok = true;
   } else {
     Serial.printf("Full refresh FAILED reason=%s source=cached\n",
       reason ? reason : "unspecified");
   }
 
-  lastNetworkRefreshMs = millis();
   recordFullAttemptCompletion();
   recoveryPending = !ok;
   Serial.printf("Cached full recovery complete reason=%s ready=%d\n",
@@ -2045,25 +1769,15 @@ bool recoverCachedDashboard(const char* reason) {
 void setup() {
   Serial.begin(115200);
 
-  if (nasSpeedCanvas.getBuffer() == nullptr) {
-    Serial.println("NAS speed canvas allocation FAILED");
-    return;
-  }
-
   wifiDisconnectHandler =
     WiFi.onStationModeDisconnected(onWiFiStationDisconnected);
   lastWifiRetryMs = millis();
   connectWifi();
   display.init(115200, true, 2, false);
   u8g2Fonts.begin(display);
-  nasSpeedFont.begin(nasSpeedCanvas);
 
   initializeNASCallbacks();
   wifiWasConnected = WiFi.status() == WL_CONNECTED;
-  if (wifiWasConnected) {
-    lastNetworkRefreshMs = millis();
-    sampleNASNetwork();
-  }
 
   attemptFullDashboard("startup", true);
   Serial.flush();
@@ -2075,27 +1789,12 @@ void loop() {
   if (wifiConnectedNow) markWiFiConnectedObserved();
   if (!wifiConnectedNow) {
     if (wifiWasConnected) {
-      Serial.println("WiFi disconnected; invalidating NAS rate baseline");
+      Serial.println("WiFi disconnected; full refresh pending");
       wifiWasConnected = false;
       clearWiFiConnectedObserved();
-      wifiDisconnectNeedsReseed = true;
       wifiReconnectRefreshPending = true;
       dataRefreshPending = true;
-      previousNetworkSample = {};
-      currentNetworkRates = {};
-      if (nasCounterFailureCount < NAS_FAILURES_BEFORE_REDISCOVERY) {
-        nasCounterFailureCount = NAS_FAILURES_BEFORE_REDISCOVERY;
-      }
       lastWifiRetryMs = millis();
-    }
-
-    if (displayReady && !offlineRatesDisplayed) {
-      currentNetworkRates = {};
-      offlineRatesDisplayed = true;
-      if (!refreshNASSpeedWindow()) {
-        displayReady = false;
-        Serial.println("Offline NAS speed partial FAILED");
-      }
     }
 
     if (intervalElapsed(millis(), lastWifiRetryMs,
@@ -2110,16 +1809,8 @@ void loop() {
   }
 
   if (!wifiWasConnected) {
-    Serial.println("WiFi reconnected; reseeding NAS rate baseline");
+    Serial.println("WiFi reconnected; scheduling full refresh");
     wifiWasConnected = true;
-    offlineRatesDisplayed = false;
-    previousNetworkSample = {};
-    currentNetworkRates = {};
-    if (nasCounterFailureCount < NAS_FAILURES_BEFORE_REDISCOVERY) {
-      nasCounterFailureCount = NAS_FAILURES_BEFORE_REDISCOVERY;
-    }
-    lastNetworkRefreshMs = millis();
-    sampleNASNetwork();
     lastFullRefreshMs = millis();
     wifiReconnectRefreshPending = true;
     dataRefreshPending = true;
@@ -2129,22 +1820,14 @@ void loop() {
   }
 
   const uint32_t now = millis();
-  const DashboardAction action = chooseConnectedDashboardAction(
-    now, lastFullRefreshMs, lastNetworkRefreshMs,
-    lastFullAttemptCompletedMs, fullAttemptRecorded, displayReady,
-    recoveryPending, dataRefreshPending, FULL_REFRESH_INTERVAL_MS,
-    NAS_SPEED_REFRESH_INTERVAL_MS, FULL_RECOVERY_BACKOFF_MS);
-  if (action == DASHBOARD_PERIODIC_FULL) {
-    attemptFullDashboard(
-      wifiReconnectRefreshPending ? "wifi-reconnected" : "scheduled", true);
-  } else if (action == DASHBOARD_RECOVERY_FULL) {
-    recoverCachedDashboard("readiness-recovery");
-  } else if (action == DASHBOARD_NETWORK_SAMPLE) {
-    lastNetworkRefreshMs = now;
-    sampleNASNetwork();
-    if (!refreshNASSpeedWindow()) {
-      Serial.println("NAS speed partial failed; starting full recovery");
-      recoverCachedDashboard("partial-recovery");
+  if (fullRefreshGuardOpen(now)) {
+    if (recoveryPending) {
+      recoverCachedDashboard("readiness-recovery");
+    } else if (dataRefreshPending ||
+               intervalElapsed(now, lastFullRefreshMs,
+                               FULL_REFRESH_INTERVAL_MS)) {
+      attemptFullDashboard(
+        wifiReconnectRefreshPending ? "wifi-reconnected" : "scheduled", true);
     }
   }
 

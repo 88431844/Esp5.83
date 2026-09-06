@@ -45,10 +45,9 @@ output_dir="$build_root/output"
 
 for required_input in \
   "$project_root/epd5in83-hanshow-arduino.ino" \
-  "$project_root/partial_refresh/GxEPD2_583_FastPartial.h" \
-  "$project_root/partial_refresh/GxEPD2_583_FastPartial.cpp" \
-  "$project_root/partial_refresh/partial_refresh_model.h" \
   "$project_root/dashboard_model.h" \
+  "$project_root/GxEPD2_583_DeepBlack.h" \
+  "$project_root/GxEPD2_583_DeepBlack.cpp" \
   "$project_root/secrets.h"; do
   if [ ! -f "$required_input" ]; then
     echo "Missing firmware build input: $required_input" >&2
@@ -90,10 +89,9 @@ rm -rf "$sketch_dir" "$output_dir"
 mkdir -p "$sketch_dir" "$output_dir"
 cp "$project_root/epd5in83-hanshow-arduino.ino" \
   "$sketch_dir/epd5in83-hanshow-arduino.ino"
-cp "$project_root/partial_refresh/GxEPD2_583_FastPartial.h" \
-  "$project_root/partial_refresh/GxEPD2_583_FastPartial.cpp" \
-  "$project_root/partial_refresh/partial_refresh_model.h" \
-  "$project_root/dashboard_model.h" \
+cp "$project_root/dashboard_model.h" \
+  "$project_root/GxEPD2_583_DeepBlack.h" \
+  "$project_root/GxEPD2_583_DeepBlack.cpp" \
   "$project_root/secrets.h" \
   "$sketch_dir/"
 

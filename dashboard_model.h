@@ -7,10 +7,10 @@
 #include <string.h>
 
 static const size_t MAX_PVE_VMS = 12;
-static const size_t MAX_VISIBLE_PVE_VMS = 7;
-static const size_t NAS_SPEED_X = 456;
+static const size_t MAX_VISIBLE_PVE_VMS = 5;
+static const size_t NAS_SPEED_X = 480;
 static const size_t NAS_SPEED_Y = 416;
-static const size_t NAS_SPEED_WIDTH = 144;
+static const size_t NAS_SPEED_WIDTH = 120;
 static const size_t NAS_SPEED_HEIGHT = 32;
 static const size_t NAS_SPEED_BUFFER_SIZE = (NAS_SPEED_WIDTH / 8) * NAS_SPEED_HEIGHT;
 
@@ -78,19 +78,23 @@ inline char* formatChineseCalendarHeader(
   return buffer;
 }
 
-inline char* formatChineseWeatherHeader(
-    int month, int day, char* buffer, size_t buffer_size) {
-  snprintf(buffer, buffer_size, "今天天气 %d月%d日", month, day);
+inline char* formatChineseWeatherHeader(char* buffer, size_t buffer_size) {
+  snprintf(buffer, buffer_size, "今天天气");
   return buffer;
 }
 
-inline char* formatChineseWeatherSummary(
-    float temperature, int humidity, float wind,
-    char* buffer, size_t buffer_size) {
-  snprintf(buffer, buffer_size,
-           "%.1f°C 湿度%d%% 风速%.1fkm/h",
-           temperature, humidity, wind);
-  return buffer;
+inline const char* chineseWeatherCondition(int code) {
+  if (code == 0) return "晴";
+  if (code >= 1 && code <= 2) return "多云";
+  if (code == 3) return "阴";
+  if (code >= 45 && code <= 48) return "雾";
+  if (code >= 51 && code <= 57) return "毛毛雨";
+  if (code >= 61 && code <= 67) return "雨";
+  if (code >= 71 && code <= 77) return "雪";
+  if (code >= 80 && code <= 82) return "阵雨";
+  if (code >= 85 && code <= 86) return "阵雪";
+  if (code >= 95 && code <= 99) return "雷雨";
+  return "未知";
 }
 
 struct NetworkCounterSample {
@@ -205,6 +209,35 @@ inline char* formatByteRate(uint64_t bytes_per_second, char* buffer, size_t buff
     snprintf(buffer, buffer_size, "%llu B/s",
              static_cast<unsigned long long>(bytes_per_second));
   }
+  return buffer;
+}
+
+inline char* formatCompactByteRate(uint64_t bytes_per_second, char* buffer,
+                                   size_t buffer_size) {
+  if (bytes_per_second >= 1024ULL * 1024ULL) {
+    snprintf(buffer, buffer_size, "%.1fM",
+             static_cast<double>(bytes_per_second) / (1024.0 * 1024.0));
+  } else if (bytes_per_second >= 1024ULL) {
+    snprintf(buffer, buffer_size, "%.1fK",
+             static_cast<double>(bytes_per_second) / 1024.0);
+  } else {
+    snprintf(buffer, buffer_size, "%lluB",
+             static_cast<unsigned long long>(bytes_per_second));
+  }
+  return buffer;
+}
+
+inline char* formatCompactNetworkRates(const NetworkRates& rates,
+                                       char* buffer, size_t buffer_size) {
+  if (!rates.valid) {
+    snprintf(buffer, buffer_size, "TX:-- RX:--");
+    return buffer;
+  }
+  char tx[20] = {};
+  char rx[20] = {};
+  formatCompactByteRate(rates.tx_bytes_per_second, tx, sizeof(tx));
+  formatCompactByteRate(rates.rx_bytes_per_second, rx, sizeof(rx));
+  snprintf(buffer, buffer_size, "TX:%s RX:%s", tx, rx);
   return buffer;
 }
 

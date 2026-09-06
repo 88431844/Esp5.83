@@ -171,10 +171,9 @@ if ! cmp -s "$expected_cli_log" "$cli_log"; then
 fi
 for staged_source in \
   epd5in83-hanshow-arduino.ino \
-  partial_refresh/GxEPD2_583_FastPartial.h \
-  partial_refresh/GxEPD2_583_FastPartial.cpp \
-  partial_refresh/partial_refresh_model.h \
   dashboard_model.h \
+  GxEPD2_583_DeepBlack.h \
+  GxEPD2_583_DeepBlack.cpp \
   secrets.h; do
   staged_name=$(basename "$staged_source")
   if ! cmp -s "$project_root/$staged_source" \
@@ -203,7 +202,7 @@ for required_text in \
   'chineseWeekdayLabel' \
   'formatChineseCalendarHeader' \
   'formatChineseWeatherHeader' \
-  'formatChineseWeatherSummary' \
+  'chineseWeatherCondition' \
   'centerTextInRect'; do
   if ! rg -qF "$required_text" "$code_source"; then
     echo "Chinese calendar/weather renderer is missing: $required_text" >&2
@@ -211,16 +210,30 @@ for required_text in \
   fi
 done
 
-if ! rg -U -q \
-    'drawUTF8\(x \+ 5, y \+ 49, buf\);\n[[:space:]]*u8g2Fonts\.setFont\(u8g2_font_helvR08_tf\);' \
-    "$code_source"; then
-  echo "Weather charts must restore the compact font after the Chinese summary" >&2
+if ! rg -q 'MAX_VISIBLE_PVE_VMS[[:space:]]*=[[:space:]]*5' \
+    "$project_root/dashboard_model.h"; then
+  echo "PVE dashboard must reserve exactly five visible VM rows" >&2
   exit 1
 fi
+
+for dashboard_layout in \
+  'drawBoldUTF8\(106,[[:space:]]*431,[[:space:]]*"内存使用"\)' \
+  'display\.drawRect\(105,[[:space:]]*435,[[:space:]]*190,[[:space:]]*10' \
+  'drawBoldUTF8\([^,]+,[[:space:]]*y \+ 43,[[:space:]]*"虚拟机"\)' \
+  'drawBoldUTF8\([^,]+,[[:space:]]*y \+ 43,[[:space:]]*"核心数"\)' \
+  'drawBoldUTF8\([^,]+,[[:space:]]*y \+ 43,[[:space:]]*"内存"\)' \
+  '"运行时间%lu天"'; do
+  if ! rg -q "$dashboard_layout" "$active_source"; then
+    echo "Requested dashboard layout is missing: $dashboard_layout" >&2
+    exit 1
+  fi
+done
 
 for obsolete_text in \
   'drawHeader(x, y, w, "Calendar")' \
   'drawHeader(x, y, w, "Weather")' \
+  '今天天气 %d月%d日' \
+  'daily_count' \
   'const char* days[] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"}' \
   'u8g2Fonts.setCursor(cx + 4, cy)'; do
   if rg -qF "$obsolete_text" "$active_source"; then
@@ -254,34 +267,49 @@ for implementation in \
   fi
 done
 
-if ! rg -q \
-    '^[[:space:]]*#[[:space:]]*include[[:space:]]*"GxEPD2_583_FastPartial\.h"' \
-    "$active_source"; then
-  echo "Required active FastPartial driver include is missing" >&2
+if rg -qF 'GxEPD2_583_FastPartial' "$active_source"; then
+  echo "Production dashboard must not include the FastPartial driver" >&2
   exit 1
 fi
 
 for source_pattern in \
-  'GxEPD2_BW[[:space:]]*<[[:space:]]*GxEPD2_583_FastPartial[[:space:]]*,[[:space:]]*32[[:space:]]*>' \
-  '(^|[^[:alnum:]_])NAS_SPEED_REFRESH_INTERVAL_MS[[:space:]]*=[[:space:]]*5000' \
-  '(^|[^[:alnum:]_])FULL_REFRESH_INTERVAL_MS[[:space:]]*=[[:space:]]*600000' \
+  'GxEPD2_BW[[:space:]]*<[[:space:]]*GxEPD2_583_DeepBlack[[:space:]]*,[[:space:]]*32[[:space:]]*>' \
+  '(^|[^[:alnum:]_])FULL_REFRESH_INTERVAL_MS[[:space:]]*=[[:space:]]*3600000' \
   '(^|[^[:alnum:]_])WIFI_RETRY_INTERVAL_MS[[:space:]]*=[[:space:]]*30000' \
-  '(^|[^[:alnum:]_])FULL_RECOVERY_BACKOFF_MS[[:space:]]*=[[:space:]]*60000' \
-  '(^|[^[:alnum:]_])NAS_NETWORK_SAMPLE_MAX_AGE_MS[[:space:]]*=[[:space:]]*60000' \
-  '(^|[^[:alnum:]_])ifHCInOctets([^[:alnum:]_]|$)' \
-  '(^|[^[:alnum:]_])ifHCOutOctets([^[:alnum:]_]|$)' \
-  '(^|[^[:alnum:]_])ipAdEntIfIndex([^[:alnum:]_]|$)'; do
+  '(^|[^[:alnum:]_])FULL_RECOVERY_BACKOFF_MS[[:space:]]*=[[:space:]]*60000'; do
   rg -q "$source_pattern" "$code_source" || {
-    echo "Required NAS speed implementation is missing: $source_pattern" >&2
+    echo "Required hourly full-refresh implementation is missing: $source_pattern" >&2
     exit 1
   }
 done
 
+for deep_driver_pattern in \
+  'class GxEPD2_583_DeepBlack : public GxEPD2_583' \
+  '_writeData(0x3C)' \
+  '_writeData(0x1E)' \
+  '_Update_DeepBlack'; do
+  if ! rg -qF "$deep_driver_pattern" \
+      "$project_root/GxEPD2_583_DeepBlack.h" \
+      "$project_root/GxEPD2_583_DeepBlack.cpp"; then
+    echo "Deep-black full-refresh driver is missing: $deep_driver_pattern" >&2
+    exit 1
+  fi
+done
+
+for conditioning_pattern in \
+  'renderSolidScreen[[:space:]]*\([[:space:]]*GxEPD_WHITE' \
+  'renderSolidScreen[[:space:]]*\([[:space:]]*GxEPD_BLACK' \
+  'renderSolidScreen[[:space:]]*\([[:space:]]*GxEPD_WHITE,[[:space:]]*"FINAL WHITE"' \
+  'conditionPanelBeforeDashboard[[:space:]]*\(' \
+  'strcmp[[:space:]]*\([[:space:]]*reason,[[:space:]]*"startup"[[:space:]]*\)'; do
+  if ! rg -q "$conditioning_pattern" "$active_source"; then
+    echo "Startup panel-conditioning sequence is missing: $conditioning_pattern" >&2
+    exit 1
+  fi
+done
+
 for scheduler_pattern in \
-  'chooseConnectedDashboardAction[[:space:]]*\(' \
-  'shouldInvalidateNetworkSample[[:space:]]*\(' \
-  'prepareFullRefresh[[:space:]]*\(' \
-  'lastFullRefreshSucceeded[[:space:]]*\(' \
+  'intervalElapsed[[:space:]]*\([[:space:]]*now,[[:space:]]*lastFullRefreshMs' \
   'fullRefreshGuardOpen[[:space:]]*\(' \
   'recordFullAttemptCompletion[[:space:]]*\(' \
   'recoverCachedDashboard[[:space:]]*\(' \
@@ -325,9 +353,7 @@ cached_recovery=$(awk '
   in_function && /^}/ { exit }
 ' "$code_source")
 for cached_pattern in \
-  'currentNetworkRates[[:space:]]*=[[:space:]]*\{\}' \
   'renderAll[[:space:]]*\(' \
-  'resumePartialModeAfterFullRefresh[[:space:]]*\(' \
   'recordFullAttemptCompletion[[:space:]]*\('; do
   printf '%s\n' "$cached_recovery" | rg -q "$cached_pattern" || {
     echo "Cached full recovery is missing: $cached_pattern" >&2
@@ -357,30 +383,32 @@ if [ "$handler_registration_line" -ge "$first_connect_line" ]; then
   exit 1
 fi
 
-for call_pattern in \
-  '^[[:space:]]*[[:alpha:]_][[:alnum:]_]*[[:space:]]*=[[:space:]]*nasSnmp[[:space:]]*\.[[:space:]]*addCounter64Handler[[:space:]]*\(' \
-  '^[[:space:]]*(const[[:space:]]+bool[[:space:]]+[[:alpha:]_][[:alnum:]_]*[[:space:]]*=[[:space:]]*)?display[[:space:]]*\.[[:space:]]*epd2[[:space:]]*\.[[:space:]]*refreshWindow[[:space:]]*\(' \
-  '^[[:space:]]*(const[[:space:]]+bool[[:space:]]+[[:alpha:]_][[:alnum:]_]*[[:space:]]*=[[:space:]]*)?display[[:space:]]*\.[[:space:]]*epd2[[:space:]]*\.[[:space:]]*beginFastMode[[:space:]]*\('; do
-  rg -q "$call_pattern" "$code_source" || {
-    echo "Required active NAS speed call is missing: $call_pattern" >&2
-    exit 1
-  }
-done
-
-for rate_buffer in upload download; do
-  rate_buffer_count=$(rg -c \
-    "char[[:space:]]+${rate_buffer}\\[32\\]" "$code_source" || true)
-  if [ "${rate_buffer_count:-0}" -ne 2 ]; then
-    echo "NAS speed rendering must use two ${rate_buffer}[32] line buffers" >&2
+for forbidden_pattern in \
+  'refreshWindow[[:space:]]*\(' \
+  'beginFastMode[[:space:]]*\(' \
+  'sampleNASNetwork[[:space:]]*\(' \
+  'formatCompactNetworkRates[[:space:]]*\(' \
+  'NAS_SPEED_REFRESH_INTERVAL_MS'; do
+  if rg -q "$forbidden_pattern" "$code_source"; then
+    echo "Production dashboard still contains NAS speed/partial behavior: $forbidden_pattern" >&2
     exit 1
   fi
 done
 
-if rg -q '(^|[^[:alnum:]_])ESP[[:space:]]*\.[[:space:]]*deepSleep[[:space:]]*\(' \
-    "$code_source"; then
-  echo "Persistent partial-refresh dashboard must not enter deep sleep" >&2
+if ! rg -q 'forecast_hours=8' "$active_source" || \
+    ! rg -q 'hourly_count' "$code_source"; then
+  echo "Eight-hour weather forecast data and rendering must remain active" >&2
   exit 1
 fi
+
+for forbidden_sleep_pattern in \
+  'display[[:space:]]*\.[[:space:]]*hibernate[[:space:]]*\(' \
+  'ESP[[:space:]]*\.[[:space:]]*deepSleep[[:space:]]*\('; do
+  if rg -q "$forbidden_sleep_pattern" "$code_source"; then
+    echo "Persistent hourly dashboard must not sleep: $forbidden_sleep_pattern" >&2
+    exit 1
+  fi
+done
 
 if rg -qF 'PVEAPIToken=' "$active_source"; then
   echo "PVE API token must not be embedded in tracked sketch source" >&2
@@ -458,4 +486,4 @@ for declaration_kind in wifi_udp snmp_manager; do
   fi
 done
 
-echo "PVE dashboard and NAS monitor calls are active"
+echo "Hourly PVE dashboard and NAS monitor calls are active"

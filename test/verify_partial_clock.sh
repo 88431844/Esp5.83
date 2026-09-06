@@ -40,6 +40,13 @@ rg -q 'waitWhileBusyStatus\("StandardFull"' "$driver_source"
 rg -q 'waitWhileBusyStatus\("StandardPowerOff"' "$driver_source"
 rg -Uq 'if \(_busy >= 0 &&[[:space:]]*!waitWhileBusyStatus\("FastPartialReady", power_on_time\)\)[[:space:]]*\{[[:space:]]*invalidateFastMode\(\);[[:space:]]*return false;[[:space:]]*\}' \
   "$driver_source"
+rg -q 'bool GxEPD2_583_FastPartial::powerOnFastMode' "$driver_source"
+rg -q 'bool GxEPD2_583_FastPartial::powerOffFastMode' "$driver_source"
+rg -Uq 'loadFastLut\(\);[[:space:]]*_using_partial_mode = true;[[:space:]]*_initial_write = false;[[:space:]]*return powerOffFastMode\(\);' \
+  "$driver_source"
+rg -q '^[[:space:]]*if \(!powerOnFastMode\(\)\) return false;' "$driver_source"
+rg -q '^[[:space:]]*if \(!powerOffFastMode\(\)\) return false;' "$driver_source"
+rg -Uq '_power_is_on = false;[[:space:]]*if \(!poweredOff\)' "$driver_source"
 rg -Uq 'if \(!waitWhileBusyStatus\("FastPartial", partial_refresh_time\)\)[[:space:]]*\{[[:space:]]*invalidateFastMode\(\);[[:space:]]*return false;[[:space:]]*\}' \
   "$driver_source"
 

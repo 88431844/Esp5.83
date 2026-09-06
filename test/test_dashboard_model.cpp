@@ -44,20 +44,27 @@ int main() {
   assert(strcmp(calendarHeader, "2026年8月30日 星期日") == 0);
 
   char weatherHeader[48] = {};
-  formatChineseWeatherHeader(8, 30, weatherHeader, sizeof(weatherHeader));
-  assert(strcmp(weatherHeader, "今天天气 8月30日") == 0);
+  formatChineseWeatherHeader(weatherHeader, sizeof(weatherHeader));
+  assert(strcmp(weatherHeader, "今天天气") == 0);
+  assert(strcmp(chineseWeatherCondition(0), "晴") == 0);
+  assert(strcmp(chineseWeatherCondition(2), "多云") == 0);
+  assert(strcmp(chineseWeatherCondition(3), "阴") == 0);
+  assert(strcmp(chineseWeatherCondition(45), "雾") == 0);
+  assert(strcmp(chineseWeatherCondition(55), "毛毛雨") == 0);
+  assert(strcmp(chineseWeatherCondition(63), "雨") == 0);
+  assert(strcmp(chineseWeatherCondition(75), "雪") == 0);
+  assert(strcmp(chineseWeatherCondition(81), "阵雨") == 0);
+  assert(strcmp(chineseWeatherCondition(86), "阵雪") == 0);
+  assert(strcmp(chineseWeatherCondition(96), "雷雨") == 0);
+  assert(strcmp(chineseWeatherCondition(-1), "未知") == 0);
 
-  char weatherSummary[80] = {};
-  formatChineseWeatherSummary(23.4f, 67, 3.2f,
-                              weatherSummary, sizeof(weatherSummary));
-  assert(strcmp(weatherSummary,
-                "23.4°C 湿度67% 风速3.2km/h") == 0);
+  assert(MAX_VISIBLE_PVE_VMS == 5);
 
-  assert(NAS_SPEED_X == 456);
+  assert(NAS_SPEED_X == 480);
   assert(NAS_SPEED_Y == 416);
-  assert(NAS_SPEED_WIDTH == 144);
+  assert(NAS_SPEED_WIDTH == 120);
   assert(NAS_SPEED_HEIGHT == 32);
-  assert(NAS_SPEED_BUFFER_SIZE == 576);
+  assert(NAS_SPEED_BUFFER_SIZE == 480);
   assert((NAS_SPEED_X % 8) == 0);
   assert((NAS_SPEED_WIDTH % 8) == 0);
 
@@ -110,6 +117,12 @@ int main() {
                          download, sizeof(download));
   assert(strcmp(upload, "TX:2.0 MB/s") == 0);
   assert(strcmp(download, "RX:1.0 KB/s") == 0);
+  char compact[48] = {};
+  formatCompactNetworkRates(rates, compact, sizeof(compact));
+  assert(strcmp(compact, "TX:2.0M RX:1.0K") == 0);
+  rates = {};
+  formatCompactNetworkRates(rates, compact, sizeof(compact));
+  assert(strcmp(compact, "TX:-- RX:--") == 0);
   rates = {UINT64_MAX, UINT64_MAX, true};
   formatNetworkRates(rates, formatted, sizeof(formatted));
   assert(strcmp(formatted,

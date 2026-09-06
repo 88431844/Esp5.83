@@ -24,6 +24,8 @@ class GxEPD2_583_FastPartial : public GxEPD2_583 {
   bool initializeStandardFullMode();
   bool waitWhileBusyStatus(const char* comment, uint16_t busyTime);
   void invalidateFastMode();
+  bool powerOnFastMode();
+  bool powerOffFastMode();
   void loadFastLut();
   void loadLut(uint8_t command, const uint8_t* data,
                uint16_t length, uint16_t totalLength);
