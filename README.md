@@ -2,24 +2,24 @@
 
 基于 ESP8266 和 600 x 448 黑白墨水屏的家庭状态看板。设备保持运行，每小时获取
 一次时间、天气、PVE 和群晖数据，并使用项目内的 600×448 深黑整屏刷新驱动。该
-驱动采用 Waveshare V1 示例的 PLL `0x3C` 和 VCOM `0x1E` 参数。启动时会在取数后
-先执行一次整屏白、整屏黑，再立即绘制四区内容，用于验证和恢复面板对比度。生产
+驱动采用 Waveshare V1 示例的 PLL `0x3C` 和 VCOM `0x1E` 参数。启动时先执行整屏黑、
+整屏白清除残影，再居中显示“WiFi连接中”；联网和取数完成后绘制四区内容。生产
 固件不使用局部刷新，群晖底栏只显示 IP 和运行天数。
 
 ## 屏幕布局
 
 | 区域 | 内容 |
 | --- | --- |
-| 左上 | 中文年月日/星期标题、周一起始月历和居中当天高亮 |
-| 右上 | 顶部今日天气/更新时间、当前气温和未来 8 小时温度曲线 |
-| 左下 | PVE 节点状态与 5 台等高排列的 QEMU 虚拟机 |
+| 左上 | 日期/星期/设备 IP 标题、周一起始月历和按实际周数自适应的当天高亮 |
+| 右上 | 顶部实时天气、当天高低温/更新时间、当前气温和带图标的未来 8 小时温度曲线 |
+| 左下 | PVE 节点状态与 5 台表格化排列的 QEMU 虚拟机 |
 | 右下 | 群晖存储池的已用、可用和总容量 |
-| 左底栏 | 按 1:2 分栏的 PVE IP 与节点内存使用条 |
-| 右底栏 | 左右平铺的群晖 IP 和中文运行时间 |
+| 左底栏 | 按 1:2 分栏的 PVE IP 与右对齐节点内存使用条 |
+| 右底栏 | 等宽平铺的群晖 IP 和“运行时间：N天” |
 
-PVE 虚拟机按“运行中优先、同组 VMID 升序”排列，最多显示 5 台。每行包含
-运行状态、名称、Guest Agent IPv4、配置 CPU 数以及当前/配置内存。运行中 VM
-没有安装或启用 QEMU Guest Agent 时，IP 显示为 `-`。
+PVE 虚拟机按“运行中优先、同组 VMID 升序”排列，最多显示 5 台。表格每行包含
+运行状态、按“虚拟机”表头宽度截取的名称、Guest Agent IPv4、配置 CPU 数以及
+当前/配置内存。运行中 VM 没有安装或启用 QEMU Guest Agent 时，IP 显示为 `-`。
 
 ## 项目结构
 
@@ -121,18 +121,20 @@ arduino-cli board list
 sh tools/flash_and_monitor.sh /dev/cu.usbserial-1120
 ```
 
-启动时会出现 `Full refresh reason=startup`，随后依次出现 NTP、天气、PVE、NAS 和
-三条 `Panel conditioning` 日志，之后是 `Full refresh complete`；每小时刷新显示
+启动时先出现两条 `Panel conditioning` 日志并显示 Wi-Fi 连接状态，随后出现
+`Full refresh reason=startup`，依次获取 NTP、天气、PVE 和 NAS，最后输出
+`Full refresh complete`；每小时刷新显示
 `Full refresh reason=scheduled`，不会重复黑白清屏。PVE 阶段和每次全刷结束还会
 打印空闲堆、最大连续块、碎片率及本轮最低堆。按 `Ctrl-C` 退出监控。
 
 典型日志如下：
 
 ```text
-Full refresh reason=startup
-Panel conditioning WHITE
 Panel conditioning BLACK
-Panel conditioning FINAL WHITE
+Panel conditioning WHITE
+Connecting WiFi... OK
+Device IP: 192.168.31.x
+Full refresh reason=startup
 Full refresh complete reason=startup ready=1
 Heap full refresh   free=... max=... frag=...% min=...
 ```
@@ -145,8 +147,8 @@ PVE 节点/VM 列表或 NAS 卷请求不完整时继续显示上一份有效
 快照；单个 Guest Agent 请求失败时保留该 VM 的旧 IP。NTP 失败会保留上次有效时间，
 冷启动且无有效时间时日历显示 `时间不可用`。
 
-当前编译基线：静态 RAM 46932/80192（58%）、IRAM 61103/65536（93%）、Flash
-752476/1048576（71%）。仍需通过实机验收确认一小时刷新和显示深度；
+当前编译基线：静态 RAM 47116/80192（58%）、IRAM 61103/65536（93%）、Flash
+757148/1048576（72%）。仍需通过实机验收确认一小时刷新和显示深度；
 完成实机验收前不应提交生产固件。
 
 ## PVE 数据流程

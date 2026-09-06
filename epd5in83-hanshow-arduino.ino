@@ -24,7 +24,14 @@ constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 30000;
 constexpr uint32_t FULL_RECOVERY_BACKOFF_MS = 60000;
 
 // ===== 数据结构 =====
-struct WeatherNow { float temp; int code; char updated_at[6]; };
+struct WeatherNow {
+  float temp;
+  float min_temp;
+  float max_temp;
+  int code;
+  char updated_at[6];
+  bool range_valid;
+};
 struct HourlyWeather { int hour; float temp; int code; };
 struct PoolInfo { char name[20]; int status; float used_tb; float total_tb; int pct; };
 
@@ -65,6 +72,8 @@ volatile bool wifiConnectedObserved = false;
 volatile bool wifiDisconnectEventRaised = false;
 volatile bool wifiOfflineDisconnectEventRaised = false;
 WiFiEventHandler wifiDisconnectHandler;
+IPAddress lastDeviceIP;
+bool deviceIPValid = false;
 
 void onWiFiStationDisconnected(
     const WiFiEventStationModeDisconnected& event) {
@@ -108,6 +117,15 @@ bool latchWiFiDisconnectEvent() {
 }
 
 // ===== WiFi/NTP =====
+void rememberDeviceIPAddress() {
+  const IPAddress currentIP = WiFi.localIP();
+  const bool nonZero = currentIP[0] != 0 || currentIP[1] != 0 ||
+                       currentIP[2] != 0 || currentIP[3] != 0;
+  if (!nonZero) return;
+  lastDeviceIP = currentIP;
+  deviceIPValid = true;
+}
+
 void connectWifi() {
   Serial.print("Connecting WiFi");
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -118,8 +136,15 @@ void connectWifi() {
     retries++;
   }
   const bool connected = WiFi.status() == WL_CONNECTED;
-  if (connected) markWiFiConnectedObserved();
+  if (connected) {
+    markWiFiConnectedObserved();
+    rememberDeviceIPAddress();
+  }
   Serial.println(connected ? " OK" : " FAILED");
+  if (connected) {
+    Serial.print("Device IP: ");
+    Serial.println(lastDeviceIP);
+  }
 }
 
 bool syncTime() {
@@ -176,7 +201,8 @@ void fetchWeather() {
     "?latitude=39.9042&longitude=116.4074"
     "&current=temperature_2m,weather_code"
     "&hourly=temperature_2m,weather_code"
-    "&timezone=Asia%2FShanghai&forecast_hours=8";
+    "&daily=temperature_2m_max,temperature_2m_min"
+    "&timezone=Asia%2FShanghai&forecast_hours=8&forecast_days=1";
   if (http.begin(client, url)) {
     int httpCode = http.GET();
     Serial.printf(" HTTP %d\n", httpCode);
@@ -190,6 +216,8 @@ void fetchWeather() {
       filter["hourly"]["time"] = true;
       filter["hourly"]["temperature_2m"] = true;
       filter["hourly"]["weather_code"] = true;
+      filter["daily"]["temperature_2m_max"] = true;
+      filter["daily"]["temperature_2m_min"] = true;
       
       JsonDocument doc;
       DeserializationError error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
@@ -211,6 +239,18 @@ void fetchWeather() {
           copyText(now_weather.updated_at, sizeof(now_weather.updated_at), "--:--");
         }
 
+        JsonArray maximumArray = doc["daily"]["temperature_2m_max"];
+        JsonArray minimumArray = doc["daily"]["temperature_2m_min"];
+        now_weather.range_valid =
+          maximumArray.size() > 0 && minimumArray.size() > 0;
+        if (now_weather.range_valid) {
+          now_weather.max_temp = maximumArray[0] | now_weather.temp;
+          now_weather.min_temp = minimumArray[0] | now_weather.temp;
+        } else {
+          now_weather.max_temp = now_weather.temp;
+          now_weather.min_temp = now_weather.temp;
+        }
+
         JsonArray timeArray = doc["hourly"]["time"];
         JsonArray temperatureArray = doc["hourly"]["temperature_2m"];
         JsonArray codeArray = doc["hourly"]["weather_code"];
@@ -225,8 +265,9 @@ void fetchWeather() {
           ++hourly_count;
         }
       }
-      Serial.printf(" %.1fC code=%d updated=%s hourly=%d\n",
-                    now_weather.temp, now_weather.code,
+      Serial.printf(" %.1fC min=%.1f max=%.1f code=%d updated=%s hourly=%d\n",
+                    now_weather.temp, now_weather.min_temp,
+                    now_weather.max_temp, now_weather.code,
                     now_weather.updated_at, hourly_count);
     }
     http.end();
@@ -1287,15 +1328,137 @@ void fetchNAS() {
 }
 
 // ===== 渲染 =====
-char getWeatherChar(int code) {
-  if (code == 0) return 'S';
-  if (code >= 1 && code <= 3) return 'C';
-  if (code >= 45 && code <= 48) return 'F';
-  if (code >= 51 && code <= 67) return 'R';
-  if (code >= 71 && code <= 77) return 'W';
-  if (code >= 80 && code <= 82) return 'H';
-  if (code >= 95) return 'T';
-  return '?';
+void formatIPAddress(const IPAddress& address, char* buffer,
+                     size_t bufferSize) {
+  snprintf(buffer, bufferSize, "%u.%u.%u.%u",
+           static_cast<unsigned int>(address[0]),
+           static_cast<unsigned int>(address[1]),
+           static_cast<unsigned int>(address[2]),
+           static_cast<unsigned int>(address[3]));
+}
+
+void drawSunIcon(int centerX, int centerY, int size) {
+  const int radius = max(2, size / 4);
+  const int rayStart = radius + 2;
+  const int rayEnd = max(rayStart + 1, size / 2);
+  display.drawCircle(centerX, centerY, radius, GxEPD_BLACK);
+  display.drawLine(centerX, centerY - rayStart,
+                   centerX, centerY - rayEnd, GxEPD_BLACK);
+  display.drawLine(centerX, centerY + rayStart,
+                   centerX, centerY + rayEnd, GxEPD_BLACK);
+  display.drawLine(centerX - rayStart, centerY,
+                   centerX - rayEnd, centerY, GxEPD_BLACK);
+  display.drawLine(centerX + rayStart, centerY,
+                   centerX + rayEnd, centerY, GxEPD_BLACK);
+  display.drawLine(centerX - rayStart + 1, centerY - rayStart + 1,
+                   centerX - rayEnd + 1, centerY - rayEnd + 1,
+                   GxEPD_BLACK);
+  display.drawLine(centerX + rayStart - 1, centerY - rayStart + 1,
+                   centerX + rayEnd - 1, centerY - rayEnd + 1,
+                   GxEPD_BLACK);
+  display.drawLine(centerX - rayStart + 1, centerY + rayStart - 1,
+                   centerX - rayEnd + 1, centerY + rayEnd - 1,
+                   GxEPD_BLACK);
+  display.drawLine(centerX + rayStart - 1, centerY + rayStart - 1,
+                   centerX + rayEnd - 1, centerY + rayEnd - 1,
+                   GxEPD_BLACK);
+}
+
+void drawCloudIcon(int centerX, int centerY, int size) {
+  const int smallRadius = max(2, size / 5);
+  const int largeRadius = max(3, size / 4);
+  display.fillCircle(centerX - size / 4, centerY,
+                     smallRadius, GxEPD_BLACK);
+  display.fillCircle(centerX, centerY - size / 6,
+                     largeRadius, GxEPD_BLACK);
+  display.fillCircle(centerX + size / 4, centerY,
+                     smallRadius, GxEPD_BLACK);
+  display.fillRect(centerX - size / 2, centerY,
+                   size, max(2, size / 4), GxEPD_BLACK);
+}
+
+void drawWeatherIcon(int centerX, int centerY, int code, int size) {
+  if (code == 0) {
+    drawSunIcon(centerX, centerY, size);
+    return;
+  }
+
+  if (code >= 1 && code <= 2) {
+    drawSunIcon(centerX - size / 5, centerY - size / 5,
+                max(8, size * 3 / 4));
+    drawCloudIcon(centerX + size / 6, centerY + size / 6,
+                  max(8, size * 3 / 4));
+    return;
+  }
+
+  drawCloudIcon(centerX, centerY - size / 6, size);
+  const int markTop = centerY + size / 4;
+  if (code >= 45 && code <= 48) {
+    display.drawLine(centerX - size / 2, markTop,
+                     centerX + size / 2, markTop, GxEPD_BLACK);
+    display.drawLine(centerX - size / 3, markTop + 3,
+                     centerX + size / 3, markTop + 3, GxEPD_BLACK);
+  } else if ((code >= 71 && code <= 77) ||
+             (code >= 85 && code <= 86)) {
+    for (int offset = -size / 4; offset <= size / 4;
+         offset += max(2, size / 4)) {
+      display.drawLine(centerX + offset - 1, markTop,
+                       centerX + offset + 1, markTop + 2, GxEPD_BLACK);
+      display.drawLine(centerX + offset + 1, markTop,
+                       centerX + offset - 1, markTop + 2, GxEPD_BLACK);
+    }
+  } else if (code >= 95 && code <= 99) {
+    display.drawLine(centerX + 1, markTop - 1,
+                     centerX - 2, markTop + 4, GxEPD_BLACK);
+    display.drawLine(centerX - 2, markTop + 4,
+                     centerX + 2, markTop + 4, GxEPD_BLACK);
+    display.drawLine(centerX + 2, markTop + 4,
+                     centerX - 1, markTop + 8, GxEPD_BLACK);
+  } else if ((code >= 51 && code <= 67) ||
+             (code >= 80 && code <= 82)) {
+    for (int offset = -size / 4; offset <= size / 4;
+         offset += max(2, size / 4)) {
+      display.drawLine(centerX + offset + 1, markTop,
+                       centerX + offset - 1, markTop + 4, GxEPD_BLACK);
+    }
+  }
+}
+
+size_t utf8CharacterLength(unsigned char lead) {
+  if ((lead & 0x80) == 0) return 1;
+  if ((lead & 0xE0) == 0xC0) return 2;
+  if ((lead & 0xF0) == 0xE0) return 3;
+  if ((lead & 0xF8) == 0xF0) return 4;
+  return 1;
+}
+
+void copyTextToPixelWidth(char* destination, size_t capacity,
+                          const char* source, int maxWidth) {
+  if (capacity == 0) return;
+  destination[0] = '\0';
+  if (!source || maxWidth <= 0) return;
+
+  size_t sourceOffset = 0;
+  size_t destinationLength = 0;
+  const size_t sourceLength = strlen(source);
+  while (sourceOffset < sourceLength) {
+    size_t characterLength = utf8CharacterLength(
+      static_cast<unsigned char>(source[sourceOffset]));
+    if (sourceOffset + characterLength > sourceLength ||
+        destinationLength + characterLength >= capacity) {
+      break;
+    }
+    memcpy(destination + destinationLength,
+           source + sourceOffset, characterLength);
+    destinationLength += characterLength;
+    destination[destinationLength] = '\0';
+    if (u8g2Fonts.getUTF8Width(destination) > maxWidth) {
+      destinationLength -= characterLength;
+      destination[destinationLength] = '\0';
+      break;
+    }
+    sourceOffset += characterLength;
+  }
 }
 
 void drawHeader(int x, int y, int w, const char* title) {
@@ -1316,16 +1479,103 @@ void drawBoldUTF8(int x, int baselineY, const char* text) {
   u8g2Fonts.drawUTF8(x + 1, baselineY, text);
 }
 
+int textWidthWithFont(const uint8_t* font, const char* text) {
+  u8g2Fonts.setFont(font);
+  return u8g2Fonts.getUTF8Width(text);
+}
+
+int drawChineseRun(int x, int baselineY, const char* text) {
+  u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
+  const int width = u8g2Fonts.getUTF8Width(text) + 1;
+  drawBoldUTF8(x, baselineY, text);
+  return x + width;
+}
+
+int drawLatinRun(int x, int baselineY, const char* text,
+                 const uint8_t* font) {
+  u8g2Fonts.setFont(font);
+  u8g2Fonts.setCursor(x, baselineY);
+  u8g2Fonts.print(text);
+  return x + u8g2Fonts.getUTF8Width(text);
+}
+
+void drawCalendarDateValue(int x, int baselineY, int year, int month,
+                           int day) {
+  char value[12] = {};
+  snprintf(value, sizeof(value), "%d", year);
+  x = drawLatinRun(x, baselineY, value, u8g2_font_helvB12_tf);
+  x = drawChineseRun(x, baselineY, "年");
+  snprintf(value, sizeof(value), "%d", month);
+  x = drawLatinRun(x, baselineY, value, u8g2_font_helvB12_tf);
+  x = drawChineseRun(x, baselineY, "月");
+  snprintf(value, sizeof(value), "%d", day);
+  x = drawLatinRun(x, baselineY, value, u8g2_font_helvB12_tf);
+  drawChineseRun(x, baselineY, "日");
+}
+
+int weatherRangeWidth(const char* maximum, const char* minimum) {
+  return textWidthWithFont(u8g2_font_wqy16_t_gb2312, "高") + 1 +
+         textWidthWithFont(u8g2_font_helvB10_tf, maximum) + 5 +
+         textWidthWithFont(u8g2_font_wqy16_t_gb2312, "低") + 1 +
+         textWidthWithFont(u8g2_font_helvB10_tf, minimum);
+}
+
+void drawWeatherRange(int x, int baselineY, const char* maximum,
+                      const char* minimum) {
+  x = drawChineseRun(x, baselineY, "高");
+  x = drawLatinRun(x, baselineY - 1, maximum, u8g2_font_helvB10_tf) + 5;
+  x = drawChineseRun(x, baselineY, "低");
+  drawLatinRun(x, baselineY - 1, minimum, u8g2_font_helvB10_tf);
+}
+
+int nasCapacitySummaryWidth(const char* used, const char* freeSpace,
+                            const char* total) {
+  const int labelWidth =
+    textWidthWithFont(u8g2_font_wqy16_t_gb2312, "已用") + 1 +
+    textWidthWithFont(u8g2_font_wqy16_t_gb2312, "可用") + 1 +
+    textWidthWithFont(u8g2_font_wqy16_t_gb2312, "总共") + 1;
+  const int valueWidth =
+    textWidthWithFont(u8g2_font_helvB10_tf, used) +
+    textWidthWithFont(u8g2_font_helvB10_tf, freeSpace) +
+    textWidthWithFont(u8g2_font_helvB10_tf, total);
+  return labelWidth + valueWidth + 8;
+}
+
+void drawNASCapacitySummary(int x, int baselineY, const char* used,
+                            const char* freeSpace, const char* total) {
+  x = drawChineseRun(x, baselineY, "已用");
+  x = drawLatinRun(x, baselineY - 1, used, u8g2_font_helvB10_tf) + 4;
+  x = drawChineseRun(x, baselineY, "可用");
+  x = drawLatinRun(x, baselineY - 1, freeSpace,
+                   u8g2_font_helvB10_tf) + 4;
+  x = drawChineseRun(x, baselineY, "总共");
+  drawLatinRun(x, baselineY - 1, total, u8g2_font_helvB10_tf);
+}
+
 void drawCalendar(int x, int y, int w, int h) {
-  char header[64] = {};
-  if (timeValid) {
-    formatChineseCalendarHeader(
-      timeinfo.tm_year + 1900, timeinfo.tm_mon + 1,
-      timeinfo.tm_mday, timeinfo.tm_wday, header, sizeof(header));
+  char deviceIP[16] = {};
+  if (deviceIPValid) {
+    formatIPAddress(lastDeviceIP, deviceIP, sizeof(deviceIP));
   } else {
-    snprintf(header, sizeof(header), "时间不可用");
+    copyText(deviceIP, sizeof(deviceIP), "--");
   }
-  drawChineseHeader(x, y, w, header);
+
+  if (timeValid) {
+    drawCalendarDateValue(
+      x + 5, y + 20, timeinfo.tm_year + 1900,
+      timeinfo.tm_mon + 1, timeinfo.tm_mday);
+    const char* weekday = chineseWeekdayName(timeinfo.tm_wday);
+    u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
+    const int weekdayWidth = u8g2Fonts.getUTF8Width(weekday) + 1;
+    drawBoldUTF8(x + (w - weekdayWidth) / 2, y + 20, weekday);
+  } else {
+    u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
+    drawBoldUTF8(x + 5, y + 20, "时间不可用");
+  }
+  u8g2Fonts.setFont(u8g2_font_helvB10_tf);
+  u8g2Fonts.setCursor(x + w - u8g2Fonts.getUTF8Width(deviceIP) - 5, y + 19);
+  u8g2Fonts.print(deviceIP);
+  display.drawLine(x, y + 28, x + w, y + 28, GxEPD_BLACK);
   if (!timeValid) return;
 
   const int year = timeinfo.tm_year + 1900;
@@ -1336,23 +1586,37 @@ void drawCalendar(int x, int y, int w, int h) {
 
   const int startX = x + 5;
   const int gridY = y + 54;
-  const int cellW = (w - 10) / 7;
-  const int cellH = (h - 54) / 6;
+  const int gridWidth = w - 10;
+  const int gridBottom = y + h - 4;
+  const int monthDays = daysInGregorianMonth(year, month);
+  const int rowCount = calendarRowCount(firstDay.tm_wday, monthDays);
 
   u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
   for (int column = 0; column < 7; column++) {
     const char* label = chineseWeekdayLabel(column);
     const int labelWidth = u8g2Fonts.getUTF8Width(label);
+    const int cellX = evenlyDividedEdge(
+      startX, startX + gridWidth, column, 7);
+    const int cellRight = evenlyDividedEdge(
+      startX, startX + gridWidth, column + 1, 7);
     u8g2Fonts.drawUTF8(
-      startX + column * cellW + (cellW - labelWidth) / 2,
+      cellX + (cellRight - cellX - labelWidth) / 2,
       y + 49, label);
   }
 
   u8g2Fonts.setFont(u8g2_font_helvB14_tf);
-  for (int day = 1; day <= daysInGregorianMonth(year, month); day++) {
+  for (int day = 1; day <= monthDays; day++) {
     const CalendarCell cell = calendarCellForDay(firstDay.tm_wday, day);
-    const int cellX = startX + cell.column * cellW;
-    const int cellY = gridY + cell.row * cellH;
+    const int cellX = evenlyDividedEdge(
+      startX, startX + gridWidth, cell.column, 7);
+    const int cellRight = evenlyDividedEdge(
+      startX, startX + gridWidth, cell.column + 1, 7);
+    const int cellY = evenlyDividedEdge(
+      gridY, gridBottom, cell.row, rowCount);
+    const int cellBottom = evenlyDividedEdge(
+      gridY, gridBottom, cell.row + 1, rowCount);
+    const int cellW = cellRight - cellX;
+    const int cellH = cellBottom - cellY;
     char dayText[3] = {};
     snprintf(dayText, sizeof(dayText), "%d", day);
     const TextPlacement text = centerTextInRect(
@@ -1377,29 +1641,51 @@ void drawCalendar(int x, int y, int w, int h) {
 }
 
 void drawWeather(int x, int y, int w, int h) {
-  char header[48] = {};
-  formatChineseWeatherHeader(header, sizeof(header));
+  const char* condition = chineseWeatherCondition(now_weather.code);
+  drawWeatherIcon(x + 14, y + 14, now_weather.code, 16);
   u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
-  drawBoldUTF8(x + 5, y + 20, header);
-  char updateHeader[24] = {};
-  snprintf(updateHeader, sizeof(updateHeader), "更新时间 %s",
-           now_weather.updated_at[0] ? now_weather.updated_at : "--:--");
-  const int updateWidth = u8g2Fonts.getUTF8Width(updateHeader) + 1;
-  drawBoldUTF8(x + w - updateWidth - 5, y + 20, updateHeader);
+  drawBoldUTF8(x + 27, y + 20, condition);
+
+  char maximum[12] = {};
+  char minimum[12] = {};
+  if (now_weather.range_valid) {
+    snprintf(maximum, sizeof(maximum), "%.0f°", now_weather.max_temp);
+    snprintf(minimum, sizeof(minimum), "%.0f°", now_weather.min_temp);
+  } else {
+    copyText(maximum, sizeof(maximum), "--");
+    copyText(minimum, sizeof(minimum), "--");
+  }
+  const int conditionWidth = u8g2Fonts.getUTF8Width(condition) + 1;
+  const int rangeX = x + 27 + conditionWidth + 7;
+  const int rangeRight = rangeX + weatherRangeWidth(maximum, minimum);
+  drawWeatherRange(rangeX, y + 20, maximum, minimum);
+
+  const char* updateLabel = "更新时间";
+  const char* updateTime = now_weather.updated_at[0]
+    ? now_weather.updated_at : "--:--";
+  int updateWidth =
+    textWidthWithFont(u8g2_font_wqy16_t_gb2312, updateLabel) + 1 + 4 +
+    textWidthWithFont(u8g2_font_helvB10_tf, updateTime);
+  int updateX = x + w - updateWidth - 5;
+  if (updateX < rangeRight + 4) {
+    updateLabel = "更新";
+    updateWidth =
+      textWidthWithFont(u8g2_font_wqy16_t_gb2312, updateLabel) + 1 + 4 +
+      textWidthWithFont(u8g2_font_helvB10_tf, updateTime);
+    updateX = x + w - updateWidth - 5;
+  }
+  updateX = drawChineseRun(updateX, y + 20, updateLabel) + 4;
+  drawLatinRun(updateX, y + 19, updateTime, u8g2_font_helvB10_tf);
   display.drawLine(x, y + 28, x + w, y + 28, GxEPD_BLACK);
 
-  const char* condition = chineseWeatherCondition(now_weather.code);
   char temperature[20] = {};
   snprintf(temperature, sizeof(temperature), "%.1f°C", now_weather.temp);
-  u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
-  const int conditionWidth = u8g2Fonts.getUTF8Width(condition) + 1;
   u8g2Fonts.setFont(u8g2_font_helvB14_tf);
   const int temperatureWidth = u8g2Fonts.getUTF8Width(temperature);
-  const int summaryX = x + (w - conditionWidth - 8 - temperatureWidth) / 2;
-  u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
-  drawBoldUTF8(summaryX, y + 53, condition);
-  u8g2Fonts.setFont(u8g2_font_helvB14_tf);
-  u8g2Fonts.setCursor(summaryX + conditionWidth + 8, y + 53);
+  const TextPlacement temperatureText = centerTextInRect(
+    x, y + 29, w, 30, temperatureWidth,
+    u8g2Fonts.getFontAscent(), u8g2Fonts.getFontDescent());
+  u8g2Fonts.setCursor(temperatureText.x, temperatureText.baseline_y);
   u8g2Fonts.print(temperature);
   display.drawLine(x, y + 59, x + w, y + 59, GxEPD_BLACK);
 
@@ -1449,10 +1735,7 @@ void drawWeather(int x, int y, int w, int h) {
       pointX - u8g2Fonts.getUTF8Width(label) / 2, pointY - 4);
     u8g2Fonts.print(label);
 
-    const char weatherSymbol[2] = {getWeatherChar(hourly[i].code), '\0'};
-    u8g2Fonts.setCursor(
-      pointX - u8g2Fonts.getUTF8Width(weatherSymbol) / 2, chartTop + 14);
-    u8g2Fonts.print(weatherSymbol);
+    drawWeatherIcon(pointX, chartTop + 14, hourly[i].code, 14);
 
     snprintf(label, sizeof(label), "%02d", hourly[i].hour);
     u8g2Fonts.setCursor(
@@ -1466,44 +1749,73 @@ void drawPVE(int x, int y, int w, int h) {
   char title[32];
   snprintf(title, sizeof(title), "PVE %s", pve_node.name);
   drawHeader(x, y, w, title);
+
+  const int vmRight = x + 68;
+  const int ipRight = x + 170;
+  const int cpuRight = x + 222;
+  const int headerBaseline = y + 44;
+  const int headerBottom = y + 48;
+
   u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
-  drawBoldUTF8(x + 18, y + 43, "虚拟机");
-  drawBoldUTF8(x + 176, y + 43, "核心数");
-  drawBoldUTF8(x + 246, y + 43, "内存");
-  u8g2Fonts.setFont(u8g2_font_helvB08_tf);
-  u8g2Fonts.setCursor(x + 120, y + 41);
+  const int vmHeaderWidth = u8g2Fonts.getUTF8Width("虚拟机") + 1;
+  const int cpuHeaderWidth = u8g2Fonts.getUTF8Width("核心数") + 1;
+  const int memoryHeaderWidth = u8g2Fonts.getUTF8Width("内存") + 1;
+  drawBoldUTF8(x + (vmRight - x - vmHeaderWidth) / 2,
+               headerBaseline, "虚拟机");
+  drawBoldUTF8(ipRight + (cpuRight - ipRight - cpuHeaderWidth) / 2,
+               headerBaseline, "核心数");
+  drawBoldUTF8(cpuRight + (x + w - cpuRight - memoryHeaderWidth) / 2,
+               headerBaseline, "内存");
+  u8g2Fonts.setFont(u8g2_font_helvB10_tf);
+  const int ipHeaderWidth = u8g2Fonts.getUTF8Width("IP");
+  u8g2Fonts.setCursor(vmRight + (ipRight - vmRight - ipHeaderWidth) / 2,
+                      headerBaseline - 1);
   u8g2Fonts.print("IP");
-  display.drawLine(x, y + 45, x + w, y + 45, GxEPD_BLACK);
+  display.drawLine(x, headerBottom, x + w, headerBottom, GxEPD_BLACK);
+  display.drawLine(vmRight, y + 26, vmRight, y + h - 1, GxEPD_BLACK);
+  display.drawLine(ipRight, y + 26, ipRight, y + h - 1, GxEPD_BLACK);
+  display.drawLine(cpuRight, y + 26, cpuRight, y + h - 1, GxEPD_BLACK);
 
   const int visible = min(vm_count, static_cast<int>(MAX_VISIBLE_PVE_VMS));
   u8g2Fonts.setFont(u8g2_font_helvB10_tf);
-  for (int i = 0; i < visible; i++) {
-    const int rowTop = y + 46 + i * (h - 46) / MAX_VISIBLE_PVE_VMS;
-    const int rowBottom = y + 46 + (i + 1) * (h - 46) / MAX_VISIBLE_PVE_VMS;
+  for (int i = 0; i < static_cast<int>(MAX_VISIBLE_PVE_VMS); i++) {
+    const int rowTop = headerBottom + i * (y + h - headerBottom) /
+      MAX_VISIBLE_PVE_VMS;
+    const int rowBottom = headerBottom + (i + 1) *
+      (y + h - headerBottom) / MAX_VISIBLE_PVE_VMS;
+    display.drawLine(x, rowBottom, x + w, rowBottom, GxEPD_BLACK);
+    if (i >= visible) continue;
+
     const TextPlacement rowText = centerTextInRect(
       0, rowTop, 0, rowBottom - rowTop, 0,
       u8g2Fonts.getFontAscent(), u8g2Fonts.getFontDescent());
     const int cy = rowText.baseline_y;
     if (vms[i].running) {
-      display.fillCircle(x + 8, cy - 4, 3, GxEPD_BLACK);
+      display.fillCircle(x + 7, cy - 3, 3, GxEPD_BLACK);
     } else {
-      display.drawCircle(x + 8, cy - 4, 3, GxEPD_BLACK);
+      display.drawCircle(x + 7, cy - 3, 3, GxEPD_BLACK);
     }
 
-    char name[12];
-    copyText(name, sizeof(name), vms[i].name);
-    u8g2Fonts.setCursor(x + 18, cy);
+    char name[20] = {};
+    copyTextToPixelWidth(name, sizeof(name), vms[i].name, vmHeaderWidth);
+    u8g2Fonts.setCursor(x + 14, cy);
     u8g2Fonts.print(name);
-    u8g2Fonts.setCursor(x + 82, cy);
+
+    const int ipWidth = u8g2Fonts.getUTF8Width(vms[i].ip);
+    u8g2Fonts.setCursor(vmRight + (ipRight - vmRight - ipWidth) / 2, cy);
     u8g2Fonts.print(vms[i].ip);
-    u8g2Fonts.setCursor(x + 194, cy);
+
+    char cpuText[8] = {};
+    snprintf(cpuText, sizeof(cpuText), "%u", vms[i].cpus);
+    const int cpuWidth = u8g2Fonts.getUTF8Width(cpuText);
+    u8g2Fonts.setCursor(ipRight + (cpuRight - ipRight - cpuWidth) / 2, cy);
     u8g2Fonts.print(vms[i].cpus);
 
-    char buf[20];
+    char buf[20] = {};
     const float usedGb = bytesToGiB(vms[i].mem_bytes);
     const float totalGb = bytesToGiB(vms[i].maxmem_bytes);
     snprintf(buf, sizeof(buf), "%.1f/%.1fG", usedGb, totalGb);
-    u8g2Fonts.setCursor(x + 224, cy);
+    u8g2Fonts.setCursor(x + w - u8g2Fonts.getUTF8Width(buf) - 4, cy);
     u8g2Fonts.print(buf);
   }
 }
@@ -1519,7 +1831,6 @@ void drawNAS(int x, int y, int w, int h) {
     const int rowBottom = contentTop + (i + 1) * contentHeight / rows;
     const int baseline = rowTop + min(18, rowBottom - rowTop - 16);
 
-    char buf[64];
     char usedStr[16], totalStr[16], freeStr[16];
     
     if (pools[i].used_tb < 1.0) sprintf(usedStr, "%.0fG", pools[i].used_tb * 1024);
@@ -1532,18 +1843,17 @@ void drawNAS(int x, int y, int w, int h) {
     if (free_tb < 1.0) sprintf(freeStr, "%.0fG", free_tb * 1024);
     else sprintf(freeStr, "%.1fT", free_tb);
     
-    snprintf(buf, sizeof(buf), "已用%s 可用%s 总共%s",
-             usedStr, freeStr, totalStr);
-
     u8g2Fonts.setFont(u8g2_font_helvB10_tf);
     u8g2Fonts.setCursor(x + 8, baseline);
     char poolName[9];
     copyText(poolName, sizeof(poolName), pools[i].name);
     u8g2Fonts.print(poolName);
 
-    u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
-    const int textWidth = u8g2Fonts.getUTF8Width(buf) + 1;
-    drawBoldUTF8(x + w - textWidth - 8, baseline, buf);
+    const int summaryWidth = nasCapacitySummaryWidth(
+      usedStr, freeStr, totalStr);
+    drawNASCapacitySummary(
+      x + w - summaryWidth - 8, baseline,
+      usedStr, freeStr, totalStr);
 
     const int barY = min(rowTop + 24, rowBottom - 11);
     display.drawRect(x + 8, barY, w - 16, 10, GxEPD_BLACK);
@@ -1560,11 +1870,8 @@ void drawPVEBottomBar() {
 
   u8g2Fonts.setForegroundColor(GxEPD_BLACK);
   u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
-  u8g2Fonts.setFont(u8g2_font_helvB08_tf);
-  u8g2Fonts.setCursor(6, 428);
-  u8g2Fonts.print("IP");
   u8g2Fonts.setFont(u8g2_font_helvB10_tf);
-  u8g2Fonts.setCursor(6, 444);
+  u8g2Fonts.setCursor((100 - u8g2Fonts.getUTF8Width(pve_node.ip)) / 2, 438);
   u8g2Fonts.print(pve_node.ip);
 
   const float usedGb = bytesToGiB(pve_node.mem_bytes);
@@ -1572,9 +1879,12 @@ void drawPVEBottomBar() {
   const uint8_t pct = memoryPercent(pve_node.mem_bytes, pve_node.maxmem_bytes);
   u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
   drawBoldUTF8(106, 431, "内存使用");
-  u8g2Fonts.setFont(u8g2_font_helvB08_tf);
-  u8g2Fonts.setCursor(174, 430);
-  u8g2Fonts.printf("%.1f/%.1fG %u%%", usedGb, totalGb, pct);
+  char memoryText[32] = {};
+  snprintf(memoryText, sizeof(memoryText), "%.1f/%.1fG %u%%",
+           usedGb, totalGb, pct);
+  u8g2Fonts.setFont(u8g2_font_helvB10_tf);
+  u8g2Fonts.setCursor(294 - u8g2Fonts.getUTF8Width(memoryText), 431);
+  u8g2Fonts.print(memoryText);
   display.drawRect(105, 435, 190, 10, GxEPD_BLACK);
   const int usedWidth = 186 * pct / 100;
   display.fillRect(107, 437, usedWidth, 6, GxEPD_BLACK);
@@ -1583,19 +1893,29 @@ void drawPVEBottomBar() {
 void drawNASBottomBar() {
   display.fillRect(301, 416, 299, 32, GxEPD_WHITE);
   display.drawLine(300, 416, 300, 447, GxEPD_BLACK);
+  display.drawLine(450, 416, 450, 447, GxEPD_BLACK);
 
   u8g2Fonts.setForegroundColor(GxEPD_BLACK);
   u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+  char nasIP[16] = {};
+  formatIPAddress(nas_ip, nasIP, sizeof(nasIP));
   u8g2Fonts.setFont(u8g2_font_helvB10_tf);
-  u8g2Fonts.setCursor(308, 440);
-  u8g2Fonts.print("IP:192.168.31.105");
+  u8g2Fonts.setCursor(300 + (150 - u8g2Fonts.getUTF8Width(nasIP)) / 2, 438);
+  u8g2Fonts.print(nasIP);
 
   const uint32_t days = g_sysUptime / (100UL * 60 * 60 * 24);
-  char runtime[32] = {};
-  snprintf(runtime, sizeof(runtime), "运行时间%lu天",
+  char dayText[12] = {};
+  snprintf(dayText, sizeof(dayText), "%lu",
            static_cast<unsigned long>(days));
-  u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
-  drawBoldUTF8(592 - u8g2Fonts.getUTF8Width(runtime), 441, runtime);
+  const char* runtimeLabel = "运行时间：";
+  const int runtimeWidth =
+    textWidthWithFont(u8g2_font_wqy16_t_gb2312, runtimeLabel) + 1 +
+    textWidthWithFont(u8g2_font_helvB10_tf, dayText) +
+    textWidthWithFont(u8g2_font_wqy16_t_gb2312, "天") + 1;
+  int runtimeX = 450 + (150 - runtimeWidth) / 2;
+  runtimeX = drawChineseRun(runtimeX, 440, runtimeLabel);
+  runtimeX = drawLatinRun(runtimeX, 439, dayText, u8g2_font_helvB10_tf);
+  drawChineseRun(runtimeX, 440, "天");
 }
 
 bool renderAll() {
@@ -1633,13 +1953,34 @@ void renderSolidScreen(uint16_t color, const char* label) {
   delay(1000);
 }
 
-void conditionPanelBeforeDashboard() {
-  // Finish conditioning on white so dashboard black pixels make an explicit
-  // white-to-black transition during the following full refresh. Starting the
-  // dashboard directly from black can leave black-to-black pixels looking weak.
-  renderSolidScreen(GxEPD_WHITE, "WHITE");
+void conditionPanelAtStartup() {
+  // A black-to-white cycle clears the previous image while leaving a clean
+  // white background for the connection status and final dashboard.
   renderSolidScreen(GxEPD_BLACK, "BLACK");
-  renderSolidScreen(GxEPD_WHITE, "FINAL WHITE");
+  renderSolidScreen(GxEPD_WHITE, "WHITE");
+}
+
+void renderWiFiConnectingScreen() {
+  display.setFullWindow();
+  display.firstPage();
+  do {
+    display.fillScreen(GxEPD_WHITE);
+    u8g2Fonts.setFontMode(1);
+    u8g2Fonts.setFontDirection(0);
+    u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+    u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+
+    const char* latin = "WiFi";
+    const char* chinese = "连接中";
+    const int totalWidth =
+      textWidthWithFont(u8g2_font_helvB14_tf, latin) + 6 +
+      textWidthWithFont(u8g2_font_wqy16_t_gb2312, chinese) + 1;
+    int messageX = (display.width() - totalWidth) / 2;
+    const int baselineY = display.height() / 2 + 7;
+    messageX = drawLatinRun(
+      messageX, baselineY - 1, latin, u8g2_font_helvB14_tf) + 6;
+    drawChineseRun(messageX, baselineY, chinese);
+  } while (display.nextPage());
 }
 
 bool fullRefreshGuardOpen(uint32_t now) {
@@ -1683,10 +2024,6 @@ bool refreshFullDashboard(const char* reason) {
 
   if (wifiConnectedAtStart && !wifiStayedConnected) {
     Serial.println("WiFi lost during full refresh");
-  }
-
-  if (reason != nullptr && strcmp(reason, "startup") == 0) {
-    conditionPanelBeforeDashboard();
   }
 
   const bool fullRenderOk = renderAll();
@@ -1771,10 +2108,13 @@ void setup() {
 
   wifiDisconnectHandler =
     WiFi.onStationModeDisconnected(onWiFiStationDisconnected);
-  lastWifiRetryMs = millis();
-  connectWifi();
   display.init(115200, true, 2, false);
   u8g2Fonts.begin(display);
+  conditionPanelAtStartup();
+  renderWiFiConnectingScreen();
+
+  lastWifiRetryMs = millis();
+  connectWifi();
 
   initializeNASCallbacks();
   wifiWasConnected = WiFi.status() == WL_CONNECTED;

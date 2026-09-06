@@ -45,6 +45,17 @@ inline CalendarCell calendarCellForDay(int first_tm_wday, int day) {
   return {index / 7, index % 7};
 }
 
+inline int calendarRowCount(int first_tm_wday, int days_in_month) {
+  if (days_in_month <= 0) return 0;
+  return calendarCellForDay(first_tm_wday, days_in_month).row + 1;
+}
+
+inline int evenlyDividedEdge(int start, int end, int index,
+                             int division_count) {
+  if (division_count <= 0) return start;
+  return start + (end - start) * index / division_count;
+}
+
 inline TextPlacement centerTextInRect(
     int x, int y, int width, int height, int text_width,
     int font_ascent, int font_descent) {
@@ -78,8 +89,9 @@ inline char* formatChineseCalendarHeader(
   return buffer;
 }
 
-inline char* formatChineseWeatherHeader(char* buffer, size_t buffer_size) {
-  snprintf(buffer, buffer_size, "今天天气");
+inline char* formatChineseCalendarDate(
+    int year, int month, int day, char* buffer, size_t buffer_size) {
+  snprintf(buffer, buffer_size, "%d年%d月%d日", year, month, day);
   return buffer;
 }
 
@@ -342,6 +354,13 @@ inline uint8_t memoryPercent(uint64_t used, uint64_t total) {
 
 inline float bytesToGiB(uint64_t bytes) {
   return static_cast<float>(bytes) / 1073741824.0f;
+}
+
+inline char* formatRuntimeDays(uint32_t days, char* buffer,
+                               size_t buffer_size) {
+  snprintf(buffer, buffer_size, "运行时间：%lu天",
+           static_cast<unsigned long>(days));
+  return buffer;
 }
 
 #endif

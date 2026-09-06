@@ -27,6 +27,14 @@ int main() {
   assert(sundayStart.row == 0 && sundayStart.column == 6);
   CalendarCell nextMonday = calendarCellForDay(0, 2);
   assert(nextMonday.row == 1 && nextMonday.column == 0);
+  assert(calendarRowCount(1, 28) == 4);
+  assert(calendarRowCount(2, 30) == 5);
+  assert(calendarRowCount(0, 31) == 6);
+  assert(calendarRowCount(1, 0) == 0);
+  assert(evenlyDividedEdge(54, 220, 0, 5) == 54);
+  assert(evenlyDividedEdge(54, 220, 1, 5) == 87);
+  assert(evenlyDividedEdge(54, 220, 5, 5) == 220);
+  assert(evenlyDividedEdge(54, 220, 3, 0) == 54);
 
   TextPlacement oneDigit = centerTextInRect(5, 54, 41, 28, 10, 15, -3);
   assert(oneDigit.x == 20);
@@ -43,9 +51,10 @@ int main() {
                               calendarHeader, sizeof(calendarHeader));
   assert(strcmp(calendarHeader, "2026年8月30日 星期日") == 0);
 
-  char weatherHeader[48] = {};
-  formatChineseWeatherHeader(weatherHeader, sizeof(weatherHeader));
-  assert(strcmp(weatherHeader, "今天天气") == 0);
+  char calendarDate[32] = {};
+  formatChineseCalendarDate(2026, 9, 6,
+                            calendarDate, sizeof(calendarDate));
+  assert(strcmp(calendarDate, "2026年9月6日") == 0);
   assert(strcmp(chineseWeatherCondition(0), "晴") == 0);
   assert(strcmp(chineseWeatherCondition(2), "多云") == 0);
   assert(strcmp(chineseWeatherCondition(3), "阴") == 0);
@@ -241,6 +250,10 @@ int main() {
   assert(bytesToGiB(0) == 0.0f);
   assert(bytesToGiB(1073741824ULL) == 1.0f);
   assert(bytesToGiB(1610612736ULL) == 1.5f);
+
+  char runtime[32] = {};
+  assert(strcmp(formatRuntimeDays(91, runtime, sizeof(runtime)),
+                "运行时间：91天") == 0);
 
   return 0;
 }

@@ -200,9 +200,13 @@ for required_text in \
   'u8g2_font_wqy16_t_gb2312' \
   'u8g2_font_helvB14_tf' \
   'chineseWeekdayLabel' \
-  'formatChineseCalendarHeader' \
-  'formatChineseWeatherHeader' \
+  'drawCalendarDateValue' \
+  'calendarRowCount' \
+  'evenlyDividedEdge' \
   'chineseWeatherCondition' \
+  'drawWeatherIcon' \
+  'drawWeatherRange' \
+  'drawNASCapacitySummary' \
   'centerTextInRect'; do
   if ! rg -qF "$required_text" "$code_source"; then
     echo "Chinese calendar/weather renderer is missing: $required_text" >&2
@@ -219,10 +223,18 @@ fi
 for dashboard_layout in \
   'drawBoldUTF8\(106,[[:space:]]*431,[[:space:]]*"内存使用"\)' \
   'display\.drawRect\(105,[[:space:]]*435,[[:space:]]*190,[[:space:]]*10' \
-  'drawBoldUTF8\([^,]+,[[:space:]]*y \+ 43,[[:space:]]*"虚拟机"\)' \
-  'drawBoldUTF8\([^,]+,[[:space:]]*y \+ 43,[[:space:]]*"核心数"\)' \
-  'drawBoldUTF8\([^,]+,[[:space:]]*y \+ 43,[[:space:]]*"内存"\)' \
-  '"运行时间%lu天"'; do
+  'formatIPAddress\(lastDeviceIP,[[:space:]]*deviceIP,[[:space:]]*sizeof\(deviceIP\)\)' \
+  'rememberDeviceIPAddress\(\)' \
+  'copyTextToPixelWidth\([^,]+,[^,]+,[[:space:]]*vms\[i\]\.name,[[:space:]]*vmHeaderWidth\)' \
+  'const int ipRight = x \+ 170' \
+  'const int cpuRight = x \+ 222' \
+  'display\.drawLine\(vmRight,[[:space:]]*y \+ 26,[[:space:]]*vmRight,[[:space:]]*y \+ h - 1' \
+  'display\.drawLine\(ipRight,[[:space:]]*y \+ 26,[[:space:]]*ipRight,[[:space:]]*y \+ h - 1' \
+  'display\.drawLine\(cpuRight,[[:space:]]*y \+ 26,[[:space:]]*cpuRight,[[:space:]]*y \+ h - 1' \
+  'u8g2Fonts\.setCursor\(294 - u8g2Fonts\.getUTF8Width\(memoryText\),[[:space:]]*431\)' \
+  'display\.drawLine\(450,[[:space:]]*416,[[:space:]]*450,[[:space:]]*447' \
+  'const char\* runtimeLabel = "运行时间："' \
+  'formatIPAddress\(nas_ip,[[:space:]]*nasIP,[[:space:]]*sizeof\(nasIP\)\)'; do
   if ! rg -q "$dashboard_layout" "$active_source"; then
     echo "Requested dashboard layout is missing: $dashboard_layout" >&2
     exit 1
@@ -232,6 +244,13 @@ done
 for obsolete_text in \
   'drawHeader(x, y, w, "Calendar")' \
   'drawHeader(x, y, w, "Weather")' \
+  '今天天气' \
+  'formatChineseWeatherHeader' \
+  'getWeatherChar' \
+  'IP:192.168.31.105' \
+  '运行时间%lu天' \
+  'conditionPanelBeforeDashboard' \
+  'FINAL WHITE' \
   '今天天气 %d月%d日' \
   'daily_count' \
   'const char* days[] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"}' \
@@ -297,11 +316,11 @@ for deep_driver_pattern in \
 done
 
 for conditioning_pattern in \
-  'renderSolidScreen[[:space:]]*\([[:space:]]*GxEPD_WHITE' \
   'renderSolidScreen[[:space:]]*\([[:space:]]*GxEPD_BLACK' \
-  'renderSolidScreen[[:space:]]*\([[:space:]]*GxEPD_WHITE,[[:space:]]*"FINAL WHITE"' \
-  'conditionPanelBeforeDashboard[[:space:]]*\(' \
-  'strcmp[[:space:]]*\([[:space:]]*reason,[[:space:]]*"startup"[[:space:]]*\)'; do
+  'renderSolidScreen[[:space:]]*\([[:space:]]*GxEPD_WHITE' \
+  'conditionPanelAtStartup[[:space:]]*\(' \
+  'renderWiFiConnectingScreen[[:space:]]*\(' \
+  'const[[:space:]]+char[[:space:]]*\*[[:space:]]+chinese[[:space:]]*=[[:space:]]*"连接中"'; do
   if ! rg -q "$conditioning_pattern" "$active_source"; then
     echo "Startup panel-conditioning sequence is missing: $conditioning_pattern" >&2
     exit 1
@@ -383,6 +402,22 @@ if [ "$handler_registration_line" -ge "$first_connect_line" ]; then
   exit 1
 fi
 
+display_init_line=$(rg -n \
+  '^[[:space:]]+display\.init[[:space:]]*\(' \
+  "$code_source" | head -n 1 | cut -d: -f1)
+conditioning_line=$(rg -n \
+  '^[[:space:]]+conditionPanelAtStartup[[:space:]]*\(' \
+  "$code_source" | head -n 1 | cut -d: -f1)
+connecting_screen_line=$(rg -n \
+  '^[[:space:]]+renderWiFiConnectingScreen[[:space:]]*\(' \
+  "$code_source" | head -n 1 | cut -d: -f1)
+if [ "$display_init_line" -ge "$conditioning_line" ] || \
+   [ "$conditioning_line" -ge "$connecting_screen_line" ] || \
+   [ "$connecting_screen_line" -ge "$first_connect_line" ]; then
+  echo "Startup must initialize display, clear black/white, show WiFi status, then connect" >&2
+  exit 1
+fi
+
 for forbidden_pattern in \
   'refreshWindow[[:space:]]*\(' \
   'beginFastMode[[:space:]]*\(' \
@@ -396,6 +431,10 @@ for forbidden_pattern in \
 done
 
 if ! rg -q 'forecast_hours=8' "$active_source" || \
+    ! rg -q 'forecast_days=1' "$active_source" || \
+    ! rg -q 'temperature_2m_max' "$active_source" || \
+    ! rg -q 'temperature_2m_min' "$active_source" || \
+    ! rg -q 'range_valid' "$code_source" || \
     ! rg -q 'hourly_count' "$code_source"; then
   echo "Eight-hour weather forecast data and rendering must remain active" >&2
   exit 1
