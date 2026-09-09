@@ -201,6 +201,11 @@ for required_text in \
   'u8g2_font_helvB14_tf' \
   'chineseWeekdayLabel' \
   'drawCalendarDateValue' \
+  'calendarDateValueWidth' \
+  'drawDashboardNextRefreshValue' \
+  'formatDashboardRefreshTime' \
+  'remainingIntervalMs' \
+  'captureDashboardTimes' \
   'calendarRowCount' \
   'evenlyDividedEdge' \
   'chineseWeatherCondition' \
@@ -225,6 +230,9 @@ for dashboard_layout in \
   'display\.drawRect\(105,[[:space:]]*435,[[:space:]]*190,[[:space:]]*10' \
   'formatIPAddress\(lastDeviceIP,[[:space:]]*deviceIP,[[:space:]]*sizeof\(deviceIP\)\)' \
   'rememberDeviceIPAddress\(\)' \
+  'const int headerGap = max' \
+  'const int weatherHeaderGap = max' \
+  'const int chartTop = y \+ 29' \
   'copyTextToPixelWidth\([^,]+,[^,]+,[[:space:]]*vms\[i\]\.name,[[:space:]]*vmHeaderWidth\)' \
   'const int ipRight = x \+ 170' \
   'const int cpuRight = x \+ 222' \
@@ -261,6 +269,18 @@ for obsolete_text in \
   fi
 done
 
+for obsolete_layout in \
+  'display.drawLine(x, y + 59, x + w, y + 59' \
+  'temperatureText' \
+  '"星期日"' \
+  '"星期一"' \
+  '"星期二"'; do
+  if rg -qF "$obsolete_layout" "$active_source"; then
+    echo "Obsolete dashboard layout remains: $obsolete_layout" >&2
+    exit 1
+  fi
+done
+
 for endpoint in \
   '/api2/json/nodes' \
   '/api2/json/cluster/resources?type=vm' \
@@ -293,11 +313,11 @@ fi
 
 for source_pattern in \
   'GxEPD2_BW[[:space:]]*<[[:space:]]*GxEPD2_583_DeepBlack[[:space:]]*,[[:space:]]*32[[:space:]]*>' \
-  '(^|[^[:alnum:]_])FULL_REFRESH_INTERVAL_MS[[:space:]]*=[[:space:]]*3600000' \
+  '(^|[^[:alnum:]_])FULL_REFRESH_INTERVAL_MS[[:space:]]*=[[:space:]]*600000' \
   '(^|[^[:alnum:]_])WIFI_RETRY_INTERVAL_MS[[:space:]]*=[[:space:]]*30000' \
   '(^|[^[:alnum:]_])FULL_RECOVERY_BACKOFF_MS[[:space:]]*=[[:space:]]*60000'; do
   rg -q "$source_pattern" "$code_source" || {
-    echo "Required hourly full-refresh implementation is missing: $source_pattern" >&2
+    echo "Required ten-minute full-refresh implementation is missing: $source_pattern" >&2
     exit 1
   }
 done
@@ -444,7 +464,7 @@ for forbidden_sleep_pattern in \
   'display[[:space:]]*\.[[:space:]]*hibernate[[:space:]]*\(' \
   'ESP[[:space:]]*\.[[:space:]]*deepSleep[[:space:]]*\('; do
   if rg -q "$forbidden_sleep_pattern" "$code_source"; then
-    echo "Persistent hourly dashboard must not sleep: $forbidden_sleep_pattern" >&2
+    echo "Persistent ten-minute dashboard must not sleep: $forbidden_sleep_pattern" >&2
     exit 1
   fi
 done
@@ -525,4 +545,4 @@ for declaration_kind in wifi_udp snmp_manager; do
   fi
 done
 
-echo "Hourly PVE dashboard and NAS monitor calls are active"
+echo "Ten-minute PVE dashboard and NAS monitor calls are active"

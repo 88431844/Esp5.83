@@ -75,24 +75,39 @@ inline const char* chineseWeekdayLabel(int monday_first_column) {
 
 inline const char* chineseWeekdayName(int tm_wday) {
   static const char* const names[] = {
-    "星期日", "星期一", "星期二", "星期三",
-    "星期四", "星期五", "星期六"
+    "周日", "周一", "周二", "周三", "周四", "周五", "周六"
   };
   return names[tm_wday];
 }
 
 inline char* formatChineseCalendarHeader(
-    int year, int month, int day, int tm_wday,
+    int month, int day, int tm_wday,
     char* buffer, size_t buffer_size) {
-  snprintf(buffer, buffer_size, "%d年%d月%d日 %s",
-           year, month, day, chineseWeekdayName(tm_wday));
+  snprintf(buffer, buffer_size, "%d月%d日 %s",
+           month, day, chineseWeekdayName(tm_wday));
   return buffer;
 }
 
 inline char* formatChineseCalendarDate(
-    int year, int month, int day, char* buffer, size_t buffer_size) {
-  snprintf(buffer, buffer_size, "%d年%d月%d日", year, month, day);
+    int month, int day, char* buffer, size_t buffer_size) {
+  snprintf(buffer, buffer_size, "%d月%d日", month, day);
   return buffer;
+}
+
+inline char* formatDashboardRefreshTime(
+    bool valid, int hour, int minute, char* buffer, size_t buffer_size) {
+  if (!valid) {
+    snprintf(buffer, buffer_size, "--:--");
+    return buffer;
+  }
+  snprintf(buffer, buffer_size, "%02d:%02d", hour, minute);
+  return buffer;
+}
+
+inline uint32_t remainingIntervalMs(
+    uint32_t now, uint32_t interval_start, uint32_t interval_ms) {
+  const uint32_t elapsed = static_cast<uint32_t>(now - interval_start);
+  return elapsed >= interval_ms ? 0 : interval_ms - elapsed;
 }
 
 inline const char* chineseWeatherCondition(int code) {

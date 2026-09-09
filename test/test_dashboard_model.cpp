@@ -45,16 +45,29 @@ int main() {
 
   assert(strcmp(chineseWeekdayLabel(0), "周一") == 0);
   assert(strcmp(chineseWeekdayLabel(6), "周日") == 0);
+  assert(strcmp(chineseWeekdayName(2), "周二") == 0);
 
   char calendarHeader[64] = {};
-  formatChineseCalendarHeader(2026, 8, 30, 0,
+  formatChineseCalendarHeader(8, 30, 0,
                               calendarHeader, sizeof(calendarHeader));
-  assert(strcmp(calendarHeader, "2026年8月30日 星期日") == 0);
+  assert(strcmp(calendarHeader, "8月30日 周日") == 0);
 
   char calendarDate[32] = {};
-  formatChineseCalendarDate(2026, 9, 6,
+  formatChineseCalendarDate(9, 6,
                             calendarDate, sizeof(calendarDate));
-  assert(strcmp(calendarDate, "2026年9月6日") == 0);
+  assert(strcmp(calendarDate, "9月6日") == 0);
+
+  char refreshTime[6] = {};
+  formatDashboardRefreshTime(
+    true, 19, 36, refreshTime, sizeof(refreshTime));
+  assert(strcmp(refreshTime, "19:36") == 0);
+  formatDashboardRefreshTime(
+    false, 0, 0, refreshTime, sizeof(refreshTime));
+  assert(strcmp(refreshTime, "--:--") == 0);
+  assert(remainingIntervalMs(1000, 0, 600000) == 599000);
+  assert(remainingIntervalMs(600000, 0, 600000) == 0);
+  assert(remainingIntervalMs(610000, 0, 600000) == 0);
+  assert(remainingIntervalMs(0x20, 0xFFFFFFF0, 0x40) == 0x10);
   assert(strcmp(chineseWeatherCondition(0), "晴") == 0);
   assert(strcmp(chineseWeatherCondition(2), "多云") == 0);
   assert(strcmp(chineseWeatherCondition(3), "阴") == 0);

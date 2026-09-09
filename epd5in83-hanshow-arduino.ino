@@ -19,7 +19,7 @@ const char* PVE_CERT_FINGERPRINT = "32:2A:C0:E1:C4:73:01:56:33:7D:CD:72:5C:19:72
 
 IPAddress nas_ip(192, 168, 31, 105);
 
-constexpr uint32_t FULL_REFRESH_INTERVAL_MS = 3600000;
+constexpr uint32_t FULL_REFRESH_INTERVAL_MS = 600000;
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 30000;
 constexpr uint32_t FULL_RECOVERY_BACKOFF_MS = 60000;
 
@@ -52,6 +52,8 @@ PoolInfo stagedPools[4];
 uint32_t g_sysUptime = 0;
 struct tm timeinfo;
 bool timeValid = false;
+struct tm nextDashboardRefreshTime;
+bool nextDashboardRefreshTimeValid = false;
 uint32_t min_free_heap = UINT32_MAX;
 
 // ===== GxEPD2 显示器 =====
@@ -174,6 +176,36 @@ bool syncTime() {
   Serial.printf(" OK: %04d-%02d-%02d %02d:%02d\n",
     timeinfo.tm_year+1900, timeinfo.tm_mon+1, timeinfo.tm_mday,
     timeinfo.tm_hour, timeinfo.tm_min);
+  return true;
+}
+
+bool captureDashboardTimes() {
+  const time_t now = time(nullptr);
+  struct tm refreshedTime;
+  if (now < 1000000000UL ||
+      localtime_r(&now, &refreshedTime) == nullptr) {
+    Serial.println("Dashboard refresh time unavailable");
+    nextDashboardRefreshTimeValid = false;
+    return false;
+  }
+  timeinfo = refreshedTime;
+  timeValid = true;
+  const uint32_t remainingMs = remainingIntervalMs(
+    millis(), lastFullRefreshMs, FULL_REFRESH_INTERVAL_MS);
+  const time_t nextRefreshEpoch = now + static_cast<time_t>(
+    (remainingMs + 999UL) / 1000UL);
+  if (localtime_r(
+        &nextRefreshEpoch, &nextDashboardRefreshTime) == nullptr) {
+    nextDashboardRefreshTimeValid = false;
+    Serial.println("Next dashboard refresh time unavailable");
+    return false;
+  }
+  nextDashboardRefreshTimeValid = true;
+  Serial.printf(
+    "Dashboard refresh time %02d:%02d next=%02d:%02d\n",
+    refreshedTime.tm_hour, refreshedTime.tm_min,
+    nextDashboardRefreshTime.tm_hour,
+    nextDashboardRefreshTime.tm_min);
   return true;
 }
 
@@ -1499,18 +1531,37 @@ int drawLatinRun(int x, int baselineY, const char* text,
   return x + u8g2Fonts.getUTF8Width(text);
 }
 
-void drawCalendarDateValue(int x, int baselineY, int year, int month,
-                           int day) {
+int calendarDateValueWidth(int month, int day) {
   char value[12] = {};
-  snprintf(value, sizeof(value), "%d", year);
-  x = drawLatinRun(x, baselineY, value, u8g2_font_helvB12_tf);
-  x = drawChineseRun(x, baselineY, "年");
+  snprintf(value, sizeof(value), "%d", month);
+  int width = textWidthWithFont(u8g2_font_helvB12_tf, value);
+  width += textWidthWithFont(u8g2_font_wqy16_t_gb2312, "月") + 1;
+  snprintf(value, sizeof(value), "%d", day);
+  width += textWidthWithFont(u8g2_font_helvB12_tf, value);
+  width += textWidthWithFont(u8g2_font_wqy16_t_gb2312, "日") + 1;
+  return width;
+}
+
+int drawCalendarDateValue(int x, int baselineY, int month, int day) {
+  char value[12] = {};
   snprintf(value, sizeof(value), "%d", month);
   x = drawLatinRun(x, baselineY, value, u8g2_font_helvB12_tf);
   x = drawChineseRun(x, baselineY, "月");
   snprintf(value, sizeof(value), "%d", day);
   x = drawLatinRun(x, baselineY, value, u8g2_font_helvB12_tf);
-  drawChineseRun(x, baselineY, "日");
+  return drawChineseRun(x, baselineY, "日");
+}
+
+int dashboardNextRefreshValueWidth(const char* nextRefreshTime) {
+  return textWidthWithFont(u8g2_font_wqy16_t_gb2312, "下次刷新") + 1 + 3 +
+         textWidthWithFont(u8g2_font_helvB10_tf, nextRefreshTime);
+}
+
+int drawDashboardNextRefreshValue(int x, int baselineY,
+                                  const char* nextRefreshTime) {
+  x = drawChineseRun(x, baselineY, "下次刷新") + 3;
+  return drawLatinRun(
+    x, baselineY - 1, nextRefreshTime, u8g2_font_helvB10_tf);
 }
 
 int weatherRangeWidth(const char* maximum, const char* minimum) {
@@ -1560,21 +1611,45 @@ void drawCalendar(int x, int y, int w, int h) {
     copyText(deviceIP, sizeof(deviceIP), "--");
   }
 
+  char nextRefreshTime[6] = {};
+  formatDashboardRefreshTime(
+    nextDashboardRefreshTimeValid, nextDashboardRefreshTime.tm_hour,
+    nextDashboardRefreshTime.tm_min,
+    nextRefreshTime, sizeof(nextRefreshTime));
+
+  const int dateWidth = timeValid
+    ? calendarDateValueWidth(timeinfo.tm_mon + 1, timeinfo.tm_mday)
+    : textWidthWithFont(u8g2_font_wqy16_t_gb2312, "时间不可用") + 1;
+  const char* weekday = timeValid
+    ? chineseWeekdayName(timeinfo.tm_wday) : nullptr;
+  const int weekdayWidth = weekday
+    ? textWidthWithFont(u8g2_font_wqy16_t_gb2312, weekday) + 1 : 0;
+  const int ipWidth = textWidthWithFont(u8g2_font_helvB10_tf, deviceIP);
+  const int refreshWidth = dashboardNextRefreshValueWidth(nextRefreshTime);
+  const int segmentCount = timeValid ? 4 : 3;
+  const int totalTextWidth =
+    dateWidth + weekdayWidth + ipWidth + refreshWidth;
+  const int availableWidth = w - 8;
+  const int headerGap = max(
+    2, (availableWidth - totalTextWidth) / (segmentCount - 1));
+  const int contentWidth =
+    totalTextWidth + headerGap * (segmentCount - 1);
+  int headerX = x + max(2, (w - contentWidth) / 2);
+
   if (timeValid) {
-    drawCalendarDateValue(
-      x + 5, y + 20, timeinfo.tm_year + 1900,
-      timeinfo.tm_mon + 1, timeinfo.tm_mday);
-    const char* weekday = chineseWeekdayName(timeinfo.tm_wday);
+    headerX = drawCalendarDateValue(
+      headerX, y + 20, timeinfo.tm_mon + 1, timeinfo.tm_mday) + headerGap;
     u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
-    const int weekdayWidth = u8g2Fonts.getUTF8Width(weekday) + 1;
-    drawBoldUTF8(x + (w - weekdayWidth) / 2, y + 20, weekday);
+    drawBoldUTF8(headerX, y + 20, weekday);
+    headerX += weekdayWidth + headerGap;
   } else {
     u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
-    drawBoldUTF8(x + 5, y + 20, "时间不可用");
+    drawBoldUTF8(headerX, y + 20, "时间不可用");
+    headerX += dateWidth + headerGap;
   }
-  u8g2Fonts.setFont(u8g2_font_helvB10_tf);
-  u8g2Fonts.setCursor(x + w - u8g2Fonts.getUTF8Width(deviceIP) - 5, y + 19);
-  u8g2Fonts.print(deviceIP);
+  headerX = drawLatinRun(
+    headerX, y + 19, deviceIP, u8g2_font_helvB10_tf) + headerGap;
+  drawDashboardNextRefreshValue(headerX, y + 20, nextRefreshTime);
   display.drawLine(x, y + 28, x + w, y + 28, GxEPD_BLACK);
   if (!timeValid) return;
 
@@ -1642,10 +1717,6 @@ void drawCalendar(int x, int y, int w, int h) {
 
 void drawWeather(int x, int y, int w, int h) {
   const char* condition = chineseWeatherCondition(now_weather.code);
-  drawWeatherIcon(x + 14, y + 14, now_weather.code, 16);
-  u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
-  drawBoldUTF8(x + 27, y + 20, condition);
-
   char maximum[12] = {};
   char minimum[12] = {};
   if (now_weather.range_valid) {
@@ -1655,39 +1726,40 @@ void drawWeather(int x, int y, int w, int h) {
     copyText(maximum, sizeof(maximum), "--");
     copyText(minimum, sizeof(minimum), "--");
   }
-  const int conditionWidth = u8g2Fonts.getUTF8Width(condition) + 1;
-  const int rangeX = x + 27 + conditionWidth + 7;
-  const int rangeRight = rangeX + weatherRangeWidth(maximum, minimum);
-  drawWeatherRange(rangeX, y + 20, maximum, minimum);
-
-  const char* updateLabel = "更新时间";
-  const char* updateTime = now_weather.updated_at[0]
-    ? now_weather.updated_at : "--:--";
-  int updateWidth =
-    textWidthWithFont(u8g2_font_wqy16_t_gb2312, updateLabel) + 1 + 4 +
-    textWidthWithFont(u8g2_font_helvB10_tf, updateTime);
-  int updateX = x + w - updateWidth - 5;
-  if (updateX < rangeRight + 4) {
-    updateLabel = "更新";
-    updateWidth =
-      textWidthWithFont(u8g2_font_wqy16_t_gb2312, updateLabel) + 1 + 4 +
-      textWidthWithFont(u8g2_font_helvB10_tf, updateTime);
-    updateX = x + w - updateWidth - 5;
-  }
-  updateX = drawChineseRun(updateX, y + 20, updateLabel) + 4;
-  drawLatinRun(updateX, y + 19, updateTime, u8g2_font_helvB10_tf);
-  display.drawLine(x, y + 28, x + w, y + 28, GxEPD_BLACK);
-
   char temperature[20] = {};
   snprintf(temperature, sizeof(temperature), "%.1f°C", now_weather.temp);
-  u8g2Fonts.setFont(u8g2_font_helvB14_tf);
-  const int temperatureWidth = u8g2Fonts.getUTF8Width(temperature);
-  const TextPlacement temperatureText = centerTextInRect(
-    x, y + 29, w, 30, temperatureWidth,
-    u8g2Fonts.getFontAscent(), u8g2Fonts.getFontDescent());
-  u8g2Fonts.setCursor(temperatureText.x, temperatureText.baseline_y);
-  u8g2Fonts.print(temperature);
-  display.drawLine(x, y + 59, x + w, y + 59, GxEPD_BLACK);
+  const char* updateLabel = "更新";
+  const char* updateTime = now_weather.updated_at[0]
+    ? now_weather.updated_at : "--:--";
+  const int conditionWidth = 16 + 5 +
+    textWidthWithFont(u8g2_font_wqy16_t_gb2312, condition) + 1;
+  const int temperatureWidth =
+    textWidthWithFont(u8g2_font_helvB14_tf, temperature);
+  const int rangeWidth = weatherRangeWidth(maximum, minimum);
+  const int updateWidth =
+    textWidthWithFont(u8g2_font_wqy16_t_gb2312, updateLabel) + 1 + 4 +
+    textWidthWithFont(u8g2_font_helvB10_tf, updateTime);
+  const int totalTextWidth =
+    conditionWidth + temperatureWidth + rangeWidth + updateWidth;
+  const int availableWidth = w - 8;
+  const int weatherHeaderGap = max(
+    2, (availableWidth - totalTextWidth) / 3);
+  const int contentWidth = totalTextWidth + weatherHeaderGap * 3;
+  int headerX = x + max(2, (w - contentWidth) / 2);
+
+  drawWeatherIcon(headerX + 8, y + 14, now_weather.code, 16);
+  headerX += 21;
+  u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
+  drawBoldUTF8(headerX, y + 20, condition);
+  headerX += conditionWidth - 21 + weatherHeaderGap;
+  headerX = drawLatinRun(
+    headerX, y + 19, temperature, u8g2_font_helvB14_tf) +
+    weatherHeaderGap;
+  drawWeatherRange(headerX, y + 20, maximum, minimum);
+  headerX += rangeWidth + weatherHeaderGap;
+  headerX = drawChineseRun(headerX, y + 20, updateLabel) + 4;
+  drawLatinRun(headerX, y + 19, updateTime, u8g2_font_helvB10_tf);
+  display.drawLine(x, y + 28, x + w, y + 28, GxEPD_BLACK);
 
   if (hourly_count <= 0) return;
 
@@ -1702,8 +1774,8 @@ void drawWeather(int x, int y, int w, int h) {
     minTemperature -= 1.0f;
   }
 
-  const int chartTop = y + 60;
-  const int chartHeight = h - 60;
+  const int chartTop = y + 29;
+  const int chartHeight = h - 29;
   const int plotTop = chartTop + 35;
   const int plotHeight = chartHeight - 65;
   const int stepX = w / hourly_count;
@@ -2021,6 +2093,7 @@ bool refreshFullDashboard(const char* reason) {
   fetchNAS();
   wifiStayedConnected = updateWiFiContinuity(
     wifiStayedConnected, "after-nas");
+  captureDashboardTimes();
 
   if (wifiConnectedAtStart && !wifiStayedConnected) {
     Serial.println("WiFi lost during full refresh");
