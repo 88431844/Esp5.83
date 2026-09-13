@@ -230,7 +230,7 @@ void fetchWeather() {
   HTTPClient http;
   http.setTimeout(10000);
   String url = "http://api.open-meteo.com/v1/forecast"
-    "?latitude=39.9042&longitude=116.4074"
+    "?latitude=22.5431&longitude=114.0579"
     "&current=temperature_2m,weather_code"
     "&hourly=temperature_2m,weather_code"
     "&daily=temperature_2m_max,temperature_2m_min"
