@@ -226,12 +226,22 @@ if ! rg -q 'MAX_VISIBLE_PVE_VMS[[:space:]]*=[[:space:]]*5' \
 fi
 
 for dashboard_layout in \
-  'drawBoldUTF8\(106,[[:space:]]*431,[[:space:]]*"内存使用"\)' \
-  'display\.drawRect\(105,[[:space:]]*435,[[:space:]]*190,[[:space:]]*10' \
   'formatIPAddress\(lastDeviceIP,[[:space:]]*deviceIP,[[:space:]]*sizeof\(deviceIP\)\)' \
   'rememberDeviceIPAddress\(\)' \
   'const int headerGap = max' \
   'const int weatherHeaderGap = max' \
+  'drawGridDivider\(headerDividerX,[[:space:]]*headerDividerTop,[[:space:]]*headerDividerBottom\)' \
+  'drawDashedHorizontalLine\(' \
+  'drawDashedVerticalLine\(' \
+  'const int weekdayHeaderTop = y \+ 31' \
+  'int currentHourIndex = -1' \
+  'drawDashedHorizontalLine\(markerLeft,[[:space:]]*markerRight,[[:space:]]*markerTop\)' \
+  'const int markerLeft = evenlyDividedEdge\([[:space:]]*x,[[:space:]]*x \+ w,[[:space:]]*currentHourIndex,[[:space:]]*hourly_count\)' \
+  'const int hourlyGridTop = chartTop \+ 1' \
+  'drawDashedVerticalLine\(edge,[[:space:]]*hourlyGridTop,[[:space:]]*hourlyGridBottom\)' \
+  'drawWeatherIcon\(pointX,[[:space:]]*chartTop \+ 14,[[:space:]]*hourly\[i\]\.code,[[:space:]]*14,[[:space:]]*inkColor\)' \
+  'const uint8_t\* labelFont = currentHour' \
+  'u8g2Fonts\.setFont\(labelFont\)' \
   'const int chartTop = y \+ 29' \
   'copyTextToPixelWidth\([^,]+,[^,]+,[[:space:]]*vms\[i\]\.name,[[:space:]]*vmHeaderWidth\)' \
   'const int ipRight = x \+ 170' \
@@ -239,9 +249,12 @@ for dashboard_layout in \
   'display\.drawLine\(vmRight,[[:space:]]*y \+ 26,[[:space:]]*vmRight,[[:space:]]*y \+ h - 1' \
   'display\.drawLine\(ipRight,[[:space:]]*y \+ 26,[[:space:]]*ipRight,[[:space:]]*y \+ h - 1' \
   'display\.drawLine\(cpuRight,[[:space:]]*y \+ 26,[[:space:]]*cpuRight,[[:space:]]*y \+ h - 1' \
+  'drawBoldUTF8\(106,[[:space:]]*431,[[:space:]]*"内存使用"\)' \
+  'display\.drawRect\(105,[[:space:]]*435,[[:space:]]*190,[[:space:]]*10' \
   'u8g2Fonts\.setCursor\(294 - u8g2Fonts\.getUTF8Width\(memoryText\),[[:space:]]*431\)' \
   'display\.drawLine\(450,[[:space:]]*416,[[:space:]]*450,[[:space:]]*447' \
-  'const char\* runtimeLabel = "运行时间："' \
+  'const char\* runtimeLabel = "运行时间"' \
+  'const int runtimeGap = 4' \
   'formatIPAddress\(nas_ip,[[:space:]]*nasIP,[[:space:]]*sizeof\(nasIP\)\)'; do
   if ! rg -q "$dashboard_layout" "$active_source"; then
     echo "Requested dashboard layout is missing: $dashboard_layout" >&2
@@ -259,6 +272,8 @@ for obsolete_text in \
   '运行时间%lu天' \
   'conditionPanelBeforeDashboard' \
   'FINAL WHITE' \
+  'const char* runtimeLabel = "运行时间："' \
+  'runtimeDividerX' \
   '今天天气 %d月%d日' \
   'daily_count' \
   'const char* days[] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"}' \

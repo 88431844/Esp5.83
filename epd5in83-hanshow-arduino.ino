@@ -1369,89 +1369,88 @@ void formatIPAddress(const IPAddress& address, char* buffer,
            static_cast<unsigned int>(address[3]));
 }
 
-void drawSunIcon(int centerX, int centerY, int size) {
+void drawSunIcon(int centerX, int centerY, int size,
+                 uint16_t color = GxEPD_BLACK) {
   const int radius = max(2, size / 4);
   const int rayStart = radius + 2;
   const int rayEnd = max(rayStart + 1, size / 2);
-  display.drawCircle(centerX, centerY, radius, GxEPD_BLACK);
+  display.drawCircle(centerX, centerY, radius, color);
   display.drawLine(centerX, centerY - rayStart,
-                   centerX, centerY - rayEnd, GxEPD_BLACK);
+                   centerX, centerY - rayEnd, color);
   display.drawLine(centerX, centerY + rayStart,
-                   centerX, centerY + rayEnd, GxEPD_BLACK);
+                   centerX, centerY + rayEnd, color);
   display.drawLine(centerX - rayStart, centerY,
-                   centerX - rayEnd, centerY, GxEPD_BLACK);
+                   centerX - rayEnd, centerY, color);
   display.drawLine(centerX + rayStart, centerY,
-                   centerX + rayEnd, centerY, GxEPD_BLACK);
+                   centerX + rayEnd, centerY, color);
   display.drawLine(centerX - rayStart + 1, centerY - rayStart + 1,
-                   centerX - rayEnd + 1, centerY - rayEnd + 1,
-                   GxEPD_BLACK);
+                   centerX - rayEnd + 1, centerY - rayEnd + 1, color);
   display.drawLine(centerX + rayStart - 1, centerY - rayStart + 1,
-                   centerX + rayEnd - 1, centerY - rayEnd + 1,
-                   GxEPD_BLACK);
+                   centerX + rayEnd - 1, centerY - rayEnd + 1, color);
   display.drawLine(centerX - rayStart + 1, centerY + rayStart - 1,
-                   centerX - rayEnd + 1, centerY + rayEnd - 1,
-                   GxEPD_BLACK);
+                   centerX - rayEnd + 1, centerY + rayEnd - 1, color);
   display.drawLine(centerX + rayStart - 1, centerY + rayStart - 1,
-                   centerX + rayEnd - 1, centerY + rayEnd - 1,
-                   GxEPD_BLACK);
+                   centerX + rayEnd - 1, centerY + rayEnd - 1, color);
 }
 
-void drawCloudIcon(int centerX, int centerY, int size) {
+void drawCloudIcon(int centerX, int centerY, int size,
+                   uint16_t color = GxEPD_BLACK) {
   const int smallRadius = max(2, size / 5);
   const int largeRadius = max(3, size / 4);
   display.fillCircle(centerX - size / 4, centerY,
-                     smallRadius, GxEPD_BLACK);
+                     smallRadius, color);
   display.fillCircle(centerX, centerY - size / 6,
-                     largeRadius, GxEPD_BLACK);
+                     largeRadius, color);
   display.fillCircle(centerX + size / 4, centerY,
-                     smallRadius, GxEPD_BLACK);
+                     smallRadius, color);
   display.fillRect(centerX - size / 2, centerY,
-                   size, max(2, size / 4), GxEPD_BLACK);
+                   size, max(2, size / 4), color);
 }
 
-void drawWeatherIcon(int centerX, int centerY, int code, int size) {
+void drawWeatherIcon(int centerX, int centerY, int code, int size,
+                     uint16_t color = GxEPD_BLACK) {
   if (code == 0) {
-    drawSunIcon(centerX, centerY, size);
+    drawSunIcon(centerX, centerY, size, color);
     return;
   }
 
   if (code >= 1 && code <= 2) {
     drawSunIcon(centerX - size / 5, centerY - size / 5,
-                max(8, size * 3 / 4));
+                max(8, size * 3 / 4), color);
     drawCloudIcon(centerX + size / 6, centerY + size / 6,
-                  max(8, size * 3 / 4));
+                  max(8, size * 3 / 4), color);
     return;
   }
 
-  drawCloudIcon(centerX, centerY - size / 6, size);
+  drawCloudIcon(centerX, centerY - size / 6, size, color);
   const int markTop = centerY + size / 4;
   if (code >= 45 && code <= 48) {
     display.drawLine(centerX - size / 2, markTop,
-                     centerX + size / 2, markTop, GxEPD_BLACK);
+                     centerX + size / 2, markTop, color);
     display.drawLine(centerX - size / 3, markTop + 3,
-                     centerX + size / 3, markTop + 3, GxEPD_BLACK);
+                     centerX + size / 3, markTop + 3, color);
   } else if ((code >= 71 && code <= 77) ||
              (code >= 85 && code <= 86)) {
     for (int offset = -size / 4; offset <= size / 4;
          offset += max(2, size / 4)) {
       display.drawLine(centerX + offset - 1, markTop,
-                       centerX + offset + 1, markTop + 2, GxEPD_BLACK);
+                       centerX + offset + 1, markTop + 2, color);
       display.drawLine(centerX + offset + 1, markTop,
-                       centerX + offset - 1, markTop + 2, GxEPD_BLACK);
+                       centerX + offset - 1, markTop + 2, color);
     }
   } else if (code >= 95 && code <= 99) {
     display.drawLine(centerX + 1, markTop - 1,
-                     centerX - 2, markTop + 4, GxEPD_BLACK);
+                     centerX - 2, markTop + 4, color);
     display.drawLine(centerX - 2, markTop + 4,
-                     centerX + 2, markTop + 4, GxEPD_BLACK);
+                     centerX + 2, markTop + 4, color);
     display.drawLine(centerX + 2, markTop + 4,
-                     centerX - 1, markTop + 8, GxEPD_BLACK);
+                     centerX - 1, markTop + 8, color);
   } else if ((code >= 51 && code <= 67) ||
              (code >= 80 && code <= 82)) {
     for (int offset = -size / 4; offset <= size / 4;
          offset += max(2, size / 4)) {
       display.drawLine(centerX + offset + 1, markTop,
-                       centerX + offset - 1, markTop + 4, GxEPD_BLACK);
+                       centerX + offset - 1, markTop + 4, color);
     }
   }
 }
@@ -1531,6 +1530,23 @@ int drawLatinRun(int x, int baselineY, const char* text,
   return x + u8g2Fonts.getUTF8Width(text);
 }
 
+void drawGridDivider(int x, int top, int bottom) {
+  if (bottom < top) return;
+  display.drawLine(x, top, x, bottom, GxEPD_BLACK);
+}
+
+void drawDashedHorizontalLine(int left, int right, int y) {
+  for (int x = left; x <= right; ++x) {
+    if ((x - left) % 4 < 2) display.drawPixel(x, y, GxEPD_BLACK);
+  }
+}
+
+void drawDashedVerticalLine(int x, int top, int bottom) {
+  for (int y = top; y <= bottom; ++y) {
+    if ((y - top) % 4 < 2) display.drawPixel(x, y, GxEPD_BLACK);
+  }
+}
+
 int calendarDateValueWidth(int month, int day) {
   char value[12] = {};
   snprintf(value, sizeof(value), "%d", month);
@@ -1589,17 +1605,29 @@ int nasCapacitySummaryWidth(const char* used, const char* freeSpace,
     textWidthWithFont(u8g2_font_helvB10_tf, used) +
     textWidthWithFont(u8g2_font_helvB10_tf, freeSpace) +
     textWidthWithFont(u8g2_font_helvB10_tf, total);
-  return labelWidth + valueWidth + 8;
+  // Keep the three capacity blocks compact while leaving the larger gaps
+  // between blocks for their vertical grid rules.
+  const int labelValueGap = 2;
+  const int fieldGap = 6;
+  return labelWidth + valueWidth + labelValueGap * 3 + fieldGap * 2;
 }
 
 void drawNASCapacitySummary(int x, int baselineY, const char* used,
                             const char* freeSpace, const char* total) {
-  x = drawChineseRun(x, baselineY, "已用");
-  x = drawLatinRun(x, baselineY - 1, used, u8g2_font_helvB10_tf) + 4;
-  x = drawChineseRun(x, baselineY, "可用");
-  x = drawLatinRun(x, baselineY - 1, freeSpace,
-                   u8g2_font_helvB10_tf) + 4;
-  x = drawChineseRun(x, baselineY, "总共");
+  const int labelValueGap = 2;
+  const int fieldGap = 6;
+  const int dividerTop = baselineY - 17;
+  const int dividerBottom = baselineY + 4;
+
+  x = drawChineseRun(x, baselineY, "已用") + labelValueGap;
+  x = drawLatinRun(x, baselineY - 1, used, u8g2_font_helvB10_tf);
+  drawGridDivider(x + fieldGap / 2, dividerTop, dividerBottom);
+  x += fieldGap;
+  x = drawChineseRun(x, baselineY, "可用") + labelValueGap;
+  x = drawLatinRun(x, baselineY - 1, freeSpace, u8g2_font_helvB10_tf);
+  drawGridDivider(x + fieldGap / 2, dividerTop, dividerBottom);
+  x += fieldGap;
+  x = drawChineseRun(x, baselineY, "总共") + labelValueGap;
   drawLatinRun(x, baselineY - 1, total, u8g2_font_helvB10_tf);
 }
 
@@ -1635,6 +1663,20 @@ void drawCalendar(int x, int y, int w, int h) {
   const int contentWidth =
     totalTextWidth + headerGap * (segmentCount - 1);
   int headerX = x + max(2, (w - contentWidth) / 2);
+  const int headerDividerTop = y + 2;
+  const int headerDividerBottom = y + 27;
+  if (timeValid) {
+    int headerDividerX = headerX + dateWidth + weekdayWidth +
+      headerGap + headerGap / 2;
+    drawGridDivider(headerDividerX, headerDividerTop, headerDividerBottom);
+    headerDividerX += ipWidth + headerGap;
+    drawGridDivider(headerDividerX, headerDividerTop, headerDividerBottom);
+  } else {
+    int headerDividerX = headerX + dateWidth + headerGap / 2;
+    drawGridDivider(headerDividerX, headerDividerTop, headerDividerBottom);
+    headerDividerX += ipWidth + headerGap;
+    drawGridDivider(headerDividerX, headerDividerTop, headerDividerBottom);
+  }
 
   if (timeValid) {
     headerX = drawCalendarDateValue(
@@ -1666,6 +1708,13 @@ void drawCalendar(int x, int y, int w, int h) {
   const int monthDays = daysInGregorianMonth(year, month);
   const int rowCount = calendarRowCount(firstDay.tm_wday, monthDays);
 
+  const int weekdayHeaderTop = y + 31;
+  display.fillRect(
+    startX, weekdayHeaderTop, gridWidth, gridY - weekdayHeaderTop,
+    GxEPD_BLACK);
+  u8g2Fonts.setFontMode(0);
+  u8g2Fonts.setForegroundColor(GxEPD_WHITE);
+  u8g2Fonts.setBackgroundColor(GxEPD_BLACK);
   u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
   for (int column = 0; column < 7; column++) {
     const char* label = chineseWeekdayLabel(column);
@@ -1677,6 +1726,20 @@ void drawCalendar(int x, int y, int w, int h) {
     u8g2Fonts.drawUTF8(
       cellX + (cellRight - cellX - labelWidth) / 2,
       y + 49, label);
+  }
+  u8g2Fonts.setFontMode(1);
+  u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+  u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+
+  for (int column = 0; column <= 7; ++column) {
+    const int edge = evenlyDividedEdge(
+      startX, startX + gridWidth, column, 7);
+    drawDashedVerticalLine(edge, gridY, gridBottom);
+  }
+  for (int row = 0; row <= rowCount; ++row) {
+    const int edge = evenlyDividedEdge(
+      gridY, gridBottom, row, rowCount);
+    drawDashedHorizontalLine(startX, startX + gridWidth, edge);
   }
 
   u8g2Fonts.setFont(u8g2_font_helvB14_tf);
@@ -1746,6 +1809,14 @@ void drawWeather(int x, int y, int w, int h) {
     2, (availableWidth - totalTextWidth) / 3);
   const int contentWidth = totalTextWidth + weatherHeaderGap * 3;
   int headerX = x + max(2, (w - contentWidth) / 2);
+  const int headerDividerTop = y + 2;
+  const int headerDividerBottom = y + 27;
+  int headerDividerX = headerX + conditionWidth + weatherHeaderGap / 2;
+  drawGridDivider(headerDividerX, headerDividerTop, headerDividerBottom);
+  headerDividerX += temperatureWidth + weatherHeaderGap;
+  drawGridDivider(headerDividerX, headerDividerTop, headerDividerBottom);
+  headerDividerX += rangeWidth + weatherHeaderGap;
+  drawGridDivider(headerDividerX, headerDividerTop, headerDividerBottom);
 
   drawWeatherIcon(headerX + 8, y + 14, now_weather.code, 16);
   headerX += 21;
@@ -1780,6 +1851,24 @@ void drawWeather(int x, int y, int w, int h) {
   const int plotHeight = chartHeight - 65;
   const int stepX = w / hourly_count;
   const int firstX = x + stepX / 2;
+  int currentHourIndex = -1;
+  if (timeValid) {
+    for (int i = 0; i < hourly_count; ++i) {
+      if (hourly[i].hour == timeinfo.tm_hour) {
+        currentHourIndex = i;
+        break;
+      }
+    }
+  }
+
+  // Light dashed rules keep every forecast hour in its own readable column.
+  const int hourlyGridTop = chartTop + 1;
+  const int hourlyGridBottom = chartTop + chartHeight - 2;
+  for (int boundary = 0; boundary <= hourly_count; ++boundary) {
+    const int edge = evenlyDividedEdge(
+      x, x + w, boundary, hourly_count);
+    drawDashedVerticalLine(edge, hourlyGridTop, hourlyGridBottom);
+  }
 
   for (int i = 0; i < hourly_count - 1; ++i) {
     const int x1 = firstX + i * stepX;
@@ -1793,28 +1882,54 @@ void drawWeather(int x, int y, int w, int h) {
     display.drawLine(x1, y1, x2, y2, GxEPD_BLACK);
   }
 
+  if (currentHourIndex >= 0) {
+    // The hourly grid already supplies the two vertical edges. Reuse those
+    // exact boundaries so the current-hour frame adds no duplicate rules.
+    const int markerLeft = evenlyDividedEdge(x, x + w, currentHourIndex, hourly_count);
+    const int markerRight = evenlyDividedEdge(x, x + w, currentHourIndex + 1, hourly_count);
+    if (markerRight > markerLeft) {
+      const int markerTop = chartTop + 1;
+      const int markerBottom = chartTop + chartHeight - 2;
+      drawDashedHorizontalLine(markerLeft, markerRight, markerTop);
+      drawDashedHorizontalLine(markerLeft, markerRight, markerBottom);
+    }
+  }
+
   u8g2Fonts.setFont(u8g2_font_helvB08_tf);
   for (int i = 0; i < hourly_count; ++i) {
     const int pointX = firstX + i * stepX;
     const int pointY = plotTop + plotHeight - static_cast<int>(
       (hourly[i].temp - minTemperature) /
       (maxTemperature - minTemperature) * plotHeight);
-    display.fillCircle(pointX, pointY, 2, GxEPD_BLACK);
+    const bool currentHour = i == currentHourIndex;
+    const uint8_t* labelFont = currentHour
+      ? u8g2_font_helvB12_tf : u8g2_font_helvB08_tf;
+    const uint16_t inkColor = GxEPD_BLACK;
+    u8g2Fonts.setFontMode(1);
+    u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+    u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+    display.fillCircle(pointX, pointY, 2, inkColor);
 
     char label[12] = {};
     snprintf(label, sizeof(label), "%.0f", hourly[i].temp);
+    u8g2Fonts.setFont(labelFont);
     u8g2Fonts.setCursor(
-      pointX - u8g2Fonts.getUTF8Width(label) / 2, pointY - 4);
+      pointX - u8g2Fonts.getUTF8Width(label) / 2,
+      pointY - (currentHour ? 6 : 4));
     u8g2Fonts.print(label);
 
-    drawWeatherIcon(pointX, chartTop + 14, hourly[i].code, 14);
+    drawWeatherIcon(pointX, chartTop + 14, hourly[i].code, 14, inkColor);
 
     snprintf(label, sizeof(label), "%02d", hourly[i].hour);
+    u8g2Fonts.setFont(labelFont);
     u8g2Fonts.setCursor(
       pointX - u8g2Fonts.getUTF8Width(label) / 2,
       chartTop + chartHeight - 5);
     u8g2Fonts.print(label);
   }
+  u8g2Fonts.setFontMode(1);
+  u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+  u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
 }
 
 void drawPVE(int x, int y, int w, int h) {
@@ -1979,13 +2094,14 @@ void drawNASBottomBar() {
   char dayText[12] = {};
   snprintf(dayText, sizeof(dayText), "%lu",
            static_cast<unsigned long>(days));
-  const char* runtimeLabel = "运行时间：";
+  const char* runtimeLabel = "运行时间";
+  const int runtimeGap = 4;
   const int runtimeWidth =
     textWidthWithFont(u8g2_font_wqy16_t_gb2312, runtimeLabel) + 1 +
-    textWidthWithFont(u8g2_font_helvB10_tf, dayText) +
+    runtimeGap + textWidthWithFont(u8g2_font_helvB10_tf, dayText) +
     textWidthWithFont(u8g2_font_wqy16_t_gb2312, "天") + 1;
   int runtimeX = 450 + (150 - runtimeWidth) / 2;
-  runtimeX = drawChineseRun(runtimeX, 440, runtimeLabel);
+  runtimeX = drawChineseRun(runtimeX, 440, runtimeLabel) + runtimeGap;
   runtimeX = drawLatinRun(runtimeX, 439, dayText, u8g2_font_helvB10_tf);
   drawChineseRun(runtimeX, 440, "天");
 }
