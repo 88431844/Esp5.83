@@ -1,23 +1,44 @@
 #include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266mDNS.h>
 #include <WiFiClientSecure.h>
 #include <WiFiUdp.h>
 #include <ESP8266HTTPClient.h>
 #include <ArduinoJson.h>
+#include <LittleFS.h>
 #include <time.h>
 #include <GxEPD2_BW.h>
 #include <U8g2_for_Adafruit_GFX.h>
 #include <Arduino_SNMP_Manager.h>
-#include <SNMPGet.h>
 #include "dashboard_model.h"
 #include "GxEPD2_583_DeepBlack.h"
 #include "secrets.h"
 
 // ===== 配置 =====
-const char* PVE_HOST = "192.168.31.34";
-const int PVE_PORT = 8006;
-const char* PVE_CERT_FINGERPRINT = "32:2A:C0:E1:C4:73:01:56:33:7D:CD:72:5C:19:72:DD:37:08:EA:C9";
+constexpr char DEFAULT_PVE_HOST[] = "192.168.31.34";
+constexpr int DEFAULT_PVE_PORT = 8006;
+constexpr char DEFAULT_PVE_CERT_FINGERPRINT[] =
+  "32:2A:C0:E1:C4:73:01:56:33:7D:CD:72:5C:19:72:DD:37:08:EA:C9";
+
+char PVE_HOST[64] = {};
+int PVE_PORT = DEFAULT_PVE_PORT;
+char PVE_CERT_FINGERPRINT[80] = {};
 
 IPAddress nas_ip(192, 168, 31, 105);
+
+constexpr int MAX_NAS_VOLUMES = 4;
+char configuredWifiSsid[64] = {};
+char configuredWifiPass[64] = {};
+char configuredSnmpCommunity[64] = {};
+char configuredPveToken[192] = {};
+char configuredNasIp[16] = {};
+char configuredWeatherLatitude[16] = "22.5431";
+char configuredWeatherLongitude[16] = "114.0579";
+char configuredTimezone[32] = "Asia%2FShanghai";
+long configuredTimezoneOffset = 28800;
+bool configStorageReady = false;
+bool configServerReady = false;
+ESP8266WebServer configServer(80);
 
 constexpr uint32_t FULL_REFRESH_INTERVAL_MS = 600000;
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 30000;
@@ -33,7 +54,22 @@ struct WeatherNow {
   bool range_valid;
 };
 struct HourlyWeather { int hour; float temp; int code; };
-struct PoolInfo { char name[20]; int status; float used_tb; float total_tb; int pct; };
+struct PoolInfo {
+  char name[20];
+  int status;
+  float used_tb;
+  float total_tb;
+  int pct;
+  int free_pct;
+};
+
+struct DataSnapshot {
+  bool valid;
+  bool cached;
+  bool error;
+  struct tm updated_at;
+  bool updated_at_valid;
+};
 
 // ===== 全局数据 =====
 WeatherNow now_weather;
@@ -46,12 +82,16 @@ PveNodeInfo previousPveNode;
 VMInfo previousPveVMs[MAX_PVE_VMS];
 int previousPveVMCount = 0;
 bool pveDataValid = false;
-PoolInfo pools[4];
+PoolInfo pools[MAX_NAS_VOLUMES];
 int pool_count = 0;
-PoolInfo stagedPools[4];
+PoolInfo stagedPools[MAX_NAS_VOLUMES];
 uint32_t g_sysUptime = 0;
 struct tm timeinfo;
 bool timeValid = false;
+struct tm currentRefreshDataTime;
+bool currentRefreshDataTimeValid = false;
+DataSnapshot pveSnapshot = {};
+DataSnapshot nasSnapshot = {};
 struct tm nextDashboardRefreshTime;
 bool nextDashboardRefreshTimeValid = false;
 uint32_t min_free_heap = UINT32_MAX;
@@ -151,8 +191,8 @@ void connectWifi() {
 
 bool syncTime() {
   Serial.print("NTP sync");
-  // 使用阿里云NTP，国内稳定
-  configTime(28800, 0, "ntp.aliyun.com", "cn.pool.ntp.org", "pool.ntp.org");
+  configTime(configuredTimezoneOffset, 0, "ntp.aliyun.com",
+             "cn.pool.ntp.org", "pool.ntp.org");
   time_t now = time(nullptr);
   int retries = 0;
   while (now < 1000000000UL && retries < 20) {  // 等到时间戳合法
@@ -216,6 +256,256 @@ void copyText(char* destination, size_t capacity, const char* source) {
   destination[capacity - 1] = '\0';
 }
 
+void setConfigDefaults() {
+  copyText(PVE_HOST, sizeof(PVE_HOST), DEFAULT_PVE_HOST);
+  PVE_PORT = DEFAULT_PVE_PORT;
+  copyText(PVE_CERT_FINGERPRINT, sizeof(PVE_CERT_FINGERPRINT),
+           DEFAULT_PVE_CERT_FINGERPRINT);
+  copyText(configuredWifiSsid, sizeof(configuredWifiSsid), WIFI_SSID);
+  copyText(configuredWifiPass, sizeof(configuredWifiPass), WIFI_PASS);
+  copyText(configuredSnmpCommunity, sizeof(configuredSnmpCommunity),
+           SNMP_COMMUNITY);
+  copyText(configuredPveToken, sizeof(configuredPveToken), PVE_TOKEN);
+  copyText(configuredNasIp, sizeof(configuredNasIp), "192.168.31.105");
+  configuredTimezoneOffset = 28800;
+}
+
+void applyRuntimeConfig() {
+  WIFI_SSID = configuredWifiSsid;
+  WIFI_PASS = configuredWifiPass;
+  SNMP_COMMUNITY = configuredSnmpCommunity;
+  PVE_TOKEN = configuredPveToken;
+  IPAddress parsedNasIp;
+  if (parsedNasIp.fromString(configuredNasIp)) nas_ip = parsedNasIp;
+}
+
+void assignConfigField(const String& key, const String& value) {
+  if (key == "wifi_ssid") {
+    copyText(configuredWifiSsid, sizeof(configuredWifiSsid), value.c_str());
+  } else if (key == "wifi_pass") {
+    copyText(configuredWifiPass, sizeof(configuredWifiPass), value.c_str());
+  } else if (key == "snmp_community") {
+    copyText(configuredSnmpCommunity, sizeof(configuredSnmpCommunity), value.c_str());
+  } else if (key == "pve_token") {
+    copyText(configuredPveToken, sizeof(configuredPveToken), value.c_str());
+  } else if (key == "pve_host") {
+    copyText(PVE_HOST, sizeof(PVE_HOST), value.c_str());
+  } else if (key == "pve_port") {
+    const int parsed = value.toInt();
+    if (parsed > 0 && parsed < 65536) PVE_PORT = parsed;
+  } else if (key == "pve_fingerprint") {
+    copyText(PVE_CERT_FINGERPRINT, sizeof(PVE_CERT_FINGERPRINT), value.c_str());
+  } else if (key == "nas_ip") {
+    copyText(configuredNasIp, sizeof(configuredNasIp), value.c_str());
+  } else if (key == "weather_latitude") {
+    copyText(configuredWeatherLatitude, sizeof(configuredWeatherLatitude), value.c_str());
+  } else if (key == "weather_longitude") {
+    copyText(configuredWeatherLongitude, sizeof(configuredWeatherLongitude), value.c_str());
+  } else if (key == "timezone") {
+    copyText(configuredTimezone, sizeof(configuredTimezone), value.c_str());
+  } else if (key == "timezone_offset") {
+    configuredTimezoneOffset = value.toInt();
+  }
+}
+
+void loadRuntimeConfig() {
+  setConfigDefaults();
+  configStorageReady = LittleFS.begin();
+  if (!configStorageReady) {
+    Serial.println("LittleFS mount failed; formatting configuration storage");
+    configStorageReady = LittleFS.format() && LittleFS.begin();
+  }
+  if (configStorageReady) {
+    File configFile = LittleFS.open("/dashboard.cfg", "r");
+    if (configFile) {
+      while (configFile.available()) {
+        String line = configFile.readStringUntil('\n');
+        line.trim();
+        const int separator = line.indexOf('=');
+        if (separator <= 0) continue;
+        assignConfigField(line.substring(0, separator),
+                          line.substring(separator + 1));
+      }
+      configFile.close();
+    }
+  }
+  applyRuntimeConfig();
+}
+
+bool saveRuntimeConfig() {
+  if (!configStorageReady) return false;
+  File configFile = LittleFS.open("/dashboard.cfg", "w");
+  if (!configFile) return false;
+  configFile.printf("wifi_ssid=%s\n", configuredWifiSsid);
+  configFile.printf("wifi_pass=%s\n", configuredWifiPass);
+  configFile.printf("snmp_community=%s\n", configuredSnmpCommunity);
+  configFile.printf("pve_token=%s\n", configuredPveToken);
+  configFile.printf("pve_host=%s\n", PVE_HOST);
+  configFile.printf("pve_port=%d\n", PVE_PORT);
+  configFile.printf("pve_fingerprint=%s\n", PVE_CERT_FINGERPRINT);
+  configFile.printf("nas_ip=%s\n", configuredNasIp);
+  configFile.printf("weather_latitude=%s\n", configuredWeatherLatitude);
+  configFile.printf("weather_longitude=%s\n", configuredWeatherLongitude);
+  configFile.printf("timezone=%s\n", configuredTimezone);
+  configFile.printf("timezone_offset=%ld\n", configuredTimezoneOffset);
+  configFile.close();
+  return true;
+}
+
+void markSnapshotSuccess(DataSnapshot& snapshot) {
+  snapshot.valid = true;
+  snapshot.cached = false;
+  snapshot.error = false;
+  if (currentRefreshDataTimeValid) {
+    snapshot.updated_at = currentRefreshDataTime;
+    snapshot.updated_at_valid = true;
+  }
+}
+
+void markSnapshotFailure(DataSnapshot& snapshot) {
+  snapshot.cached = snapshot.valid;
+  snapshot.error = !snapshot.valid;
+}
+
+void formatSnapshotStatus(const DataSnapshot& snapshot,
+                          char* buffer, size_t bufferSize) {
+  const char* prefix = snapshot.cached ? "缓存" :
+    (snapshot.error ? "异常" : "更新");
+  if (!snapshot.updated_at_valid) {
+    snprintf(buffer, bufferSize, "%s --:--", prefix);
+    return;
+  }
+  snprintf(buffer, bufferSize, "%s %02d:%02d", prefix,
+           snapshot.updated_at.tm_hour, snapshot.updated_at.tm_min);
+}
+
+String htmlEscape(const char* value) {
+  String escaped;
+  escaped.reserve(strlen(value ? value : "") + 8);
+  for (const char* cursor = value ? value : ""; *cursor; ++cursor) {
+    switch (*cursor) {
+      case '&': escaped += F("&amp;"); break;
+      case '<': escaped += F("&lt;"); break;
+      case '>': escaped += F("&gt;"); break;
+      case '"': escaped += F("&quot;"); break;
+      case '\'': escaped += F("&#39;"); break;
+      default: escaped += *cursor; break;
+    }
+  }
+  return escaped;
+}
+
+void sendConfigPage() {
+  configServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  configServer.send(200, "text/html; charset=utf-8", "");
+  configServer.sendContent(F("<!doctype html><html lang='zh-CN'><head>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>ESP 5.83 看板配置</title><style>"
+    "body{margin:0;background:#f2f4f7;color:#17202a;font:16px system-ui,sans-serif}"
+    ".wrap{max-width:720px;margin:auto;padding:24px}.card{background:#fff;"
+    "border:1px solid #d8dee6;border-radius:14px;padding:20px;margin:12px 0;"
+    "box-shadow:0 4px 16px #17202a12}h1{margin:0 0 6px;font-size:24px}"
+    "h2{font-size:17px;margin:0 0 14px}.muted{color:#5f6b76;font-size:13px}"
+    "label{display:block;font-weight:600;margin:12px 0 5px}input{box-sizing:border-box;"
+    "width:100%;padding:10px 12px;border:1px solid #b8c2cc;border-radius:8px;"
+    "font:inherit}button{margin-top:18px;background:#17202a;color:#fff;border:0;"
+    "border-radius:8px;padding:11px 16px;font:inherit;cursor:pointer}"
+    ".grid{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}@media(max-width:560px){"
+    ".grid{grid-template-columns:1fr}}</style></head><body><main class='wrap'>"
+    "<div class='card'><h1>ESP 5.83 看板</h1><div class='muted'>仅限局域网访问。保存后设备会自动重启。</div></div>"
+    "<form method='post' action='/save'><div class='card'><h2>网络</h2>"));
+  configServer.sendContent(F("<label>Wi‑Fi 名称</label><input name='wifi_ssid' value='"));
+  configServer.sendContent(htmlEscape(configuredWifiSsid));
+  configServer.sendContent(F("'><label>Wi‑Fi 密码</label><input type='password' name='wifi_pass' placeholder='留空保持不变'>"
+    "</div><div class='card'><h2>PVE</h2><div class='grid'><div><label>地址</label><input name='pve_host' value='"));
+  configServer.sendContent(htmlEscape(PVE_HOST));
+  configServer.sendContent(F("'></div><div><label>端口</label><input name='pve_port' type='number' value='"));
+  configServer.sendContent(String(PVE_PORT));
+  configServer.sendContent(F("'></div></div><label>API Token</label><input type='password' name='pve_token' placeholder='留空保持不变'>"
+    "<label>证书指纹</label><input name='pve_fingerprint' value='"));
+  configServer.sendContent(htmlEscape(PVE_CERT_FINGERPRINT));
+  configServer.sendContent(F("'></div><div class='card'><h2>群晖 NAS</h2><div class='grid'><div><label>地址</label><input name='nas_ip' value='"));
+  configServer.sendContent(htmlEscape(configuredNasIp));
+  configServer.sendContent(F("'></div><div><label>SNMP Community</label><input type='password' name='snmp_community' placeholder='留空保持不变'></div></div></div>"
+    "<div class='card'><h2>天气和时间</h2><div class='grid'><div><label>纬度</label><input name='weather_latitude' value='"));
+  configServer.sendContent(htmlEscape(configuredWeatherLatitude));
+  configServer.sendContent(F("'></div><div><label>经度</label><input name='weather_longitude' value='"));
+  configServer.sendContent(htmlEscape(configuredWeatherLongitude));
+  configServer.sendContent(F("'></div></div><label>时区偏移（秒）</label><input name='timezone_offset' type='number' value='"));
+  configServer.sendContent(String(configuredTimezoneOffset));
+  configServer.sendContent(F("'></div><button type='submit'>保存并重启</button></form>"
+    "<div class='card'><a href='/refresh'>立即刷新看板</a></div></main></body></html>"));
+}
+
+void handleConfigSave() {
+  if (configServer.hasArg("wifi_ssid")) {
+    copyText(configuredWifiSsid, sizeof(configuredWifiSsid),
+             configServer.arg("wifi_ssid").c_str());
+  }
+  if (configServer.hasArg("wifi_pass") && configServer.arg("wifi_pass").length() > 0) {
+    copyText(configuredWifiPass, sizeof(configuredWifiPass),
+             configServer.arg("wifi_pass").c_str());
+  }
+  if (configServer.hasArg("snmp_community") && configServer.arg("snmp_community").length() > 0) {
+    copyText(configuredSnmpCommunity, sizeof(configuredSnmpCommunity),
+             configServer.arg("snmp_community").c_str());
+  }
+  if (configServer.hasArg("pve_token") && configServer.arg("pve_token").length() > 0) {
+    copyText(configuredPveToken, sizeof(configuredPveToken),
+             configServer.arg("pve_token").c_str());
+  }
+  const char* fields[] = {
+    "pve_host", "pve_port", "pve_fingerprint", "nas_ip",
+    "weather_latitude", "weather_longitude", "timezone_offset"
+  };
+  for (const char* field : fields) {
+    if (configServer.hasArg(field)) assignConfigField(field, configServer.arg(field));
+  }
+  applyRuntimeConfig();
+  const bool saved = saveRuntimeConfig();
+  configServer.send(200, "text/html; charset=utf-8",
+    saved ? "<p>配置已保存，设备即将重启。</p>"
+          : "<p>配置保存失败，请检查文件系统。</p>");
+  if (saved) {
+    delay(500);
+    ESP.restart();
+  }
+}
+
+void handleConfigRefresh() {
+  dataRefreshPending = true;
+  configServer.send(200, "text/plain; charset=utf-8",
+                    "已安排下一次完整刷新，请返回看板查看结果。\n");
+}
+
+void startWebServices() {
+  if (configServerReady) return;
+  configServer.on("/", HTTP_GET, sendConfigPage);
+  configServer.on("/save", HTTP_POST, handleConfigSave);
+  configServer.on("/refresh", HTTP_GET, handleConfigRefresh);
+  if (WiFi.status() == WL_CONNECTED) {
+    if (MDNS.begin("esp583")) {
+      Serial.println("Config page: http://esp583.local/");
+    }
+  } else {
+    WiFi.mode(WIFI_AP_STA);
+    char apName[32] = {};
+    snprintf(apName, sizeof(apName), "ESP583-Setup-%06X",
+             static_cast<unsigned int>(ESP.getChipId() & 0xFFFFFF));
+    WiFi.softAP(apName);
+    Serial.printf("Config AP: %s http://%s/\n", apName,
+                  WiFi.softAPIP().toString().c_str());
+  }
+  configServer.begin();
+  configServerReady = true;
+}
+
+void serviceWebServices() {
+  if (!configServerReady) return;
+  configServer.handleClient();
+  if (WiFi.status() == WL_CONNECTED) MDNS.update();
+}
+
 void logHeap(const char* stage) {
   uint32_t freeHeap = ESP.getFreeHeap();
   if (freeHeap < min_free_heap) min_free_heap = freeHeap;
@@ -229,12 +519,13 @@ void fetchWeather() {
   WiFiClient client;
   HTTPClient http;
   http.setTimeout(10000);
-  String url = "http://api.open-meteo.com/v1/forecast"
-    "?latitude=22.5431&longitude=114.0579"
-    "&current=temperature_2m,weather_code"
-    "&hourly=temperature_2m,weather_code"
-    "&daily=temperature_2m_max,temperature_2m_min"
-    "&timezone=Asia%2FShanghai&forecast_hours=8&forecast_days=1";
+  char url[256] = {};
+  snprintf(url, sizeof(url),
+    "http://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s"
+    "&current=temperature_2m,weather_code&hourly=temperature_2m,weather_code"
+    "&daily=temperature_2m_max,temperature_2m_min&timezone=%s"
+    "&forecast_hours=8&forecast_days=1",
+    configuredWeatherLatitude, configuredWeatherLongitude, configuredTimezone);
   if (http.begin(client, url)) {
     int httpCode = http.GET();
     Serial.printf(" HTTP %d\n", httpCode);
@@ -518,7 +809,7 @@ bool fetchPVEGuestIP(VMInfo& vm) {
   return ok;
 }
 
-void fetchPVE() {
+bool fetchPVE() {
   previousPveNode = pve_node;
   memcpy(previousPveVMs, vms, sizeof(vms));
   previousPveVMCount = vm_count;
@@ -545,8 +836,9 @@ void fetchPVE() {
     } else {
       Serial.println("PVE refresh incomplete; no previous snapshot");
     }
+    markSnapshotFailure(pveSnapshot);
     logHeap("after PVE");
-    return;
+    return false;
   }
 
   const int visible = min(vm_count, static_cast<int>(MAX_VISIBLE_PVE_VMS));
@@ -566,30 +858,28 @@ void fetchPVE() {
     logHeap("after guest IP");
   }
   pveDataValid = true;
+  markSnapshotSuccess(pveSnapshot);
   Serial.printf("PVE node=%s %s, VMs=%d\n", pve_node.name,
     nodeOk ? "OK" : "FAILED", vmOk ? vm_count : 0);
   logHeap("after PVE");
+  return true;
 }
 
 // 全局缓冲，防止底层库持有栈内指针导致崩溃
-char g_volNameBufs[4][SNMP_OCTETSTRING_MAX_LENGTH];
-char* g_volNames[4] = {g_volNameBufs[0], g_volNameBufs[1], g_volNameBufs[2], g_volNameBufs[3]};
-int g_volAlloc[4] = {0, 0, 0, 0};
-int g_volTotal[4] = {0, 0, 0, 0};
-int g_volUsed[4] = {0, 0, 0, 0};
-char g_oidName[4][64];
-char g_oidAlloc[4][64];
-char g_oidTotal[4][64];
-char g_oidUsed[4][64];
+int g_volAlloc[MAX_NAS_VOLUMES] = {};
+int g_volTotal[MAX_NAS_VOLUMES] = {};
+int g_volUsed[MAX_NAS_VOLUMES] = {};
+char g_oidAlloc[MAX_NAS_VOLUMES][64];
+char g_oidTotal[MAX_NAS_VOLUMES][64];
+char g_oidUsed[MAX_NAS_VOLUMES][64];
 
 static WiFiUDP nasUdp;
 static SNMPManager nasSnmp(SNMP_COMMUNITY);
 bool nasCallbacksReady = false;
 ValueCallback* cbUptime = nullptr;
-ValueCallback* cbName[4] = {};
-ValueCallback* cbAlloc[4] = {};
-ValueCallback* cbTotal[4] = {};
-ValueCallback* cbUsed[4] = {};
+ValueCallback* cbAlloc[MAX_NAS_VOLUMES] = {};
+ValueCallback* cbTotal[MAX_NAS_VOLUMES] = {};
+ValueCallback* cbUsed[MAX_NAS_VOLUMES] = {};
 uint32_t nasRequestGeneration = 0;
 
 static const size_t MAX_NAS_REQUEST_CALLBACKS = 4;
@@ -650,6 +940,16 @@ struct NASDecodedValue {
   uint64_t unsignedValue;
 };
 
+struct NASDiscoveredVolume {
+  uint32_t index;
+  char name[20];
+};
+
+constexpr char NAS_STORAGE_DESCR_OID[] = "1.3.6.1.2.1.25.2.3.1.3";
+constexpr char NAS_STORAGE_ALLOC_OID[] = "1.3.6.1.2.1.25.2.3.1.4";
+constexpr char NAS_STORAGE_SIZE_OID[] = "1.3.6.1.2.1.25.2.3.1.5";
+constexpr char NAS_STORAGE_USED_OID[] = "1.3.6.1.2.1.25.2.3.1.6";
+
 size_t nasBERSize(const NASBERWriter& writer);
 bool nasBERPrepend(NASBERWriter& writer, const uint8_t* value,
                    size_t length);
@@ -669,6 +969,16 @@ bool decodeNASValue(ValueCallback* callback, const NASBERTLV& tlv,
 bool nasOIDMatchesCallback(const NASBERTLV& oid, ValueCallback* callback);
 bool commitNASDecodedValue(ValueCallback* callback,
                            const NASDecodedValue& decoded);
+bool decodeNASOIDText(const NASBERTLV& oid, char* output, size_t capacity);
+bool encodeNASGetNextRequest(const char* oid, uint16_t requestId,
+                             uint8_t* buffer, size_t capacity,
+                             size_t& offset, size_t& length);
+bool requestNASGetNext(const char* oid, uint16_t requestId,
+                       char* nextOid, size_t nextOidCapacity,
+                       char* stringValue, size_t stringValueCapacity,
+                       uint32_t timeoutMs);
+bool discoverNASVolumes(NASDiscoveredVolume* volumes, size_t capacity,
+                        size_t& count);
 
 size_t nasBERSize(const NASBERWriter& writer) {
   return static_cast<size_t>(writer.end - writer.cursor);
@@ -834,6 +1144,89 @@ bool encodeNASGetRequest(ValueCallback* const* callbacks, size_t count,
     return false;
   }
 
+  offset = static_cast<size_t>(writer.cursor - buffer);
+  length = nasBERSize(writer);
+  return true;
+}
+
+bool readNASOIDSubidentifier(const uint8_t* bytes, size_t length,
+                             size_t& offset, uint32_t& value) {
+  value = 0;
+  uint8_t groups = 0;
+  while (offset < length && groups < 5) {
+    const uint8_t encoded = bytes[offset++];
+    if (value > (UINT32_MAX >> 7)) return false;
+    value = (value << 7) | (encoded & 0x7F);
+    ++groups;
+    if ((encoded & 0x80) == 0) return true;
+  }
+  return false;
+}
+
+bool appendNASOIDArc(char* output, size_t capacity, size_t& used,
+                     uint32_t arc, bool first) {
+  const int written = snprintf(output + used, capacity - used,
+                               first ? "%lu" : ".%lu",
+                               static_cast<unsigned long>(arc));
+  if (written < 0 || static_cast<size_t>(written) >= capacity - used) {
+    return false;
+  }
+  used += static_cast<size_t>(written);
+  return true;
+}
+
+bool decodeNASOIDText(const NASBERTLV& oid, char* output, size_t capacity) {
+  if (output == nullptr || capacity == 0 || oid.tag != OID ||
+      oid.length == 0) return false;
+  output[0] = '\0';
+  size_t offset = 0;
+  uint32_t combined = 0;
+  if (!readNASOIDSubidentifier(oid.value, oid.length, offset, combined)) {
+    return false;
+  }
+  const uint32_t first = combined < 40 ? 0 : (combined < 80 ? 1 : 2);
+  const uint32_t second = first < 2 ? combined - first * 40 : combined - 80;
+  size_t used = 0;
+  if (!appendNASOIDArc(output, capacity, used, first, true) ||
+      !appendNASOIDArc(output, capacity, used, second, false)) {
+    return false;
+  }
+  while (offset < oid.length) {
+    uint32_t arc = 0;
+    if (!readNASOIDSubidentifier(oid.value, oid.length, offset, arc) ||
+        !appendNASOIDArc(output, capacity, used, arc, false)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool encodeNASGetNextRequest(const char* oid, uint16_t requestId,
+                             uint8_t* buffer, size_t capacity,
+                             size_t& offset, size_t& length) {
+  NASBERWriter writer = {buffer, buffer + capacity, buffer + capacity};
+  uint8_t encodedOID[MAX_OID_LENGTH];
+  size_t oidLength = 0;
+  if (!encodeNASOID(oid, encodedOID, sizeof(encodedOID), oidLength) ||
+      !nasBERPrependTLV(writer, NULLTYPE, nullptr, 0) ||
+      !nasBERPrependTLV(writer, OID, encodedOID, oidLength) ||
+      !nasBERWrap(writer, STRUCTURE, nasBERSize(writer)) ||
+      !nasBERWrap(writer, STRUCTURE, nasBERSize(writer)) ||
+      !nasBERPrependPositiveInteger(writer, 0) ||
+      !nasBERPrependPositiveInteger(writer, 0) ||
+      !nasBERPrependPositiveInteger(writer, requestId) ||
+      !nasBERWrap(writer, GetNextRequestPDU, nasBERSize(writer))) {
+    return false;
+  }
+
+  const size_t communityLength = strlen(SNMP_COMMUNITY);
+  if (!nasBERPrependTLV(writer, STRING,
+                        reinterpret_cast<const uint8_t*>(SNMP_COMMUNITY),
+                        communityLength) ||
+      !nasBERPrependPositiveInteger(writer, 1) ||
+      !nasBERWrap(writer, STRUCTURE, nasBERSize(writer))) {
+    return false;
+  }
   offset = static_cast<size_t>(writer.cursor - buffer);
   length = nasBERSize(writer);
   return true;
@@ -1102,6 +1495,187 @@ bool receiveNASResponse(uint16_t requestId,
            static_cast<size_t>(packetLength), requestId, callbacks, count);
 }
 
+bool decodeNASGetNextResponse(const uint8_t* packet, size_t packetLength,
+                              uint16_t requestId, char* nextOid,
+                              size_t nextOidCapacity, char* stringValue,
+                              size_t stringValueCapacity) {
+  if (packet == nullptr || packetLength == 0 || nextOid == nullptr ||
+      stringValue == nullptr || nextOidCapacity == 0 ||
+      stringValueCapacity == 0) return false;
+
+  const uint8_t* packetEnd = packet + packetLength;
+  const uint8_t* outerCursor = packet;
+  NASBERTLV message;
+  if (!readNASBERTLV(outerCursor, packetEnd, message) ||
+      message.tag != STRUCTURE || outerCursor != packetEnd) return false;
+
+  const uint8_t* messageCursor = message.value;
+  const uint8_t* messageEnd = message.value + message.length;
+  NASBERTLV version;
+  NASBERTLV community;
+  NASBERTLV responsePDU;
+  int32_t decodedVersion = 0;
+  const size_t communityLength = strlen(SNMP_COMMUNITY);
+  if (!readNASBERTLV(messageCursor, messageEnd, version) ||
+      !decodeNASSignedInteger(version, decodedVersion) ||
+      decodedVersion != 1 ||
+      !readNASBERTLV(messageCursor, messageEnd, community) ||
+      community.tag != STRING || community.length != communityLength ||
+      memcmp(community.value, SNMP_COMMUNITY, communityLength) != 0 ||
+      !readNASBERTLV(messageCursor, messageEnd, responsePDU) ||
+      responsePDU.tag != GetResponsePDU || messageCursor != messageEnd) {
+    return false;
+  }
+
+  const uint8_t* pduCursor = responsePDU.value;
+  const uint8_t* pduEnd = responsePDU.value + responsePDU.length;
+  NASBERTLV responseRequestId;
+  NASBERTLV errorStatus;
+  NASBERTLV errorIndex;
+  NASBERTLV varBindList;
+  int32_t decodedRequestId = 0;
+  int32_t decodedErrorStatus = 0;
+  int32_t decodedErrorIndex = 0;
+  if (!readNASBERTLV(pduCursor, pduEnd, responseRequestId) ||
+      !decodeNASSignedInteger(responseRequestId, decodedRequestId) ||
+      decodedRequestId != requestId ||
+      !readNASBERTLV(pduCursor, pduEnd, errorStatus) ||
+      !decodeNASSignedInteger(errorStatus, decodedErrorStatus) ||
+      decodedErrorStatus != 0 ||
+      !readNASBERTLV(pduCursor, pduEnd, errorIndex) ||
+      !decodeNASSignedInteger(errorIndex, decodedErrorIndex) ||
+      decodedErrorIndex != 0 ||
+      !readNASBERTLV(pduCursor, pduEnd, varBindList) ||
+      varBindList.tag != STRUCTURE || pduCursor != pduEnd) {
+    return false;
+  }
+
+  const uint8_t* listCursor = varBindList.value;
+  const uint8_t* listEnd = varBindList.value + varBindList.length;
+  NASBERTLV varBind;
+  if (!readNASBERTLV(listCursor, listEnd, varBind) ||
+      varBind.tag != STRUCTURE) return false;
+  const uint8_t* varBindCursor = varBind.value;
+  const uint8_t* varBindEnd = varBind.value + varBind.length;
+  NASBERTLV oid;
+  NASBERTLV value;
+  if (!readNASBERTLV(varBindCursor, varBindEnd, oid) ||
+      !readNASBERTLV(varBindCursor, varBindEnd, value) ||
+      varBindCursor != varBindEnd ||
+      !decodeNASOIDText(oid, nextOid, nextOidCapacity)) {
+    return false;
+  }
+  if (value.tag != STRING) {
+    stringValue[0] = '\0';
+    return true;
+  }
+  if (value.length >= stringValueCapacity) return false;
+  memcpy(stringValue, value.value, value.length);
+  stringValue[value.length] = '\0';
+  return true;
+}
+
+bool requestNASGetNext(const char* oid, uint16_t requestId,
+                       char* nextOid, size_t nextOidCapacity,
+                       char* stringValue, size_t stringValueCapacity,
+                       uint32_t timeoutMs) {
+  if (oid == nullptr || requestId == 0 || requestId > 32767) return false;
+  if (!beginNASRequestSocket()) return false;
+  static uint8_t requestBuffer[SNMP_PACKET_LENGTH];
+  size_t offset = 0;
+  size_t length = 0;
+  if (!encodeNASGetNextRequest(oid, requestId, requestBuffer,
+                               sizeof(requestBuffer), offset, length) ||
+      nasUdp.beginPacket(nas_ip, 161) != 1 ||
+      nasUdp.write(requestBuffer + offset, length) != length ||
+      nasUdp.endPacket() != 1) {
+    nasUdp.stop();
+    return false;
+  }
+
+  const uint32_t startedAt = millis();
+  static uint8_t responseBuffer[SNMP_PACKET_LENGTH * 3];
+  while (!intervalElapsed(millis(), startedAt, timeoutMs)) {
+    const int packetLength = nasUdp.parsePacket();
+    if (packetLength <= 0) {
+      delay(10);
+      continue;
+    }
+    const IPAddress responseIP = nasUdp.remoteIP();
+    const uint16_t responsePort = nasUdp.remotePort();
+    if (packetLength > static_cast<int>(sizeof(responseBuffer))) {
+      while (nasUdp.available() > 0) nasUdp.read();
+      continue;
+    }
+    const int bytesRead = nasUdp.read(responseBuffer, packetLength);
+    if (bytesRead == packetLength && responseIP == nas_ip &&
+        responsePort == 161 &&
+        decodeNASGetNextResponse(responseBuffer,
+          static_cast<size_t>(packetLength), requestId, nextOid,
+          nextOidCapacity, stringValue, stringValueCapacity)) {
+      nasUdp.stop();
+      return true;
+    }
+  }
+  nasUdp.stop();
+  return false;
+}
+
+bool parseNASVolumeIndex(const char* oid, uint32_t& index) {
+  const size_t prefixLength = strlen(NAS_STORAGE_DESCR_OID);
+  if (strncmp(oid, NAS_STORAGE_DESCR_OID, prefixLength) != 0 ||
+      oid[prefixLength] != '.') return false;
+  const char* cursor = oid + prefixLength + 1;
+  if (*cursor == '\0') return false;
+  uint32_t parsed = 0;
+  while (*cursor >= '0' && *cursor <= '9') {
+    const uint32_t digit = static_cast<uint32_t>(*cursor - '0');
+    if (parsed > (UINT32_MAX - digit) / 10U) return false;
+    parsed = parsed * 10U + digit;
+    ++cursor;
+  }
+  if (*cursor != '\0' || parsed == 0) return false;
+  index = parsed;
+  return true;
+}
+
+bool discoverNASVolumes(NASDiscoveredVolume* volumes, size_t capacity,
+                        size_t& count) {
+  count = 0;
+  if (volumes == nullptr || capacity == 0) return false;
+  char cursor[96] = {};
+  copyText(cursor, sizeof(cursor), NAS_STORAGE_DESCR_OID);
+  const size_t prefixLength = strlen(NAS_STORAGE_DESCR_OID);
+  for (uint16_t attempt = 0; attempt < 64; ++attempt) {
+    char nextOid[96] = {};
+    char description[SNMP_OCTETSTRING_MAX_LENGTH] = {};
+    if (!requestNASGetNext(cursor, static_cast<uint16_t>(3000 + attempt),
+                           nextOid, sizeof(nextOid), description,
+                           sizeof(description), 1000)) {
+      return false;
+    }
+    if (strncmp(nextOid, NAS_STORAGE_DESCR_OID, prefixLength) != 0 ||
+        nextOid[prefixLength] != '.') {
+      return true;
+    }
+    if (strncmp(nextOid, cursor, sizeof(nextOid)) == 0) return false;
+    uint32_t index = 0;
+    if (parseNASVolumeIndex(nextOid, index) &&
+        strncmp(description, "/volume", 7) == 0) {
+      if (count < capacity) {
+        volumes[count].index = index;
+        copyText(volumes[count].name, sizeof(volumes[count].name),
+                 description);
+        ++count;
+      }
+      if (count == capacity) return true;
+    }
+    copyText(cursor, sizeof(cursor), nextOid);
+    yield();
+  }
+  return false;
+}
+
 bool sendNASGetRequest(ValueCallback* const* callbacks, size_t count,
                        uint16_t requestId) {
   static uint8_t requestBuffer[SNMP_PACKET_LENGTH];
@@ -1263,35 +1837,67 @@ void initializeNASCallbacks() {
     return;
   }
 
+  nasSnmp._community = SNMP_COMMUNITY;
   nasSnmp._udp = nullptr;
   nasSnmp.setUDP(&nasUdp);
   cbUptime = nasSnmp.addTimestampHandler(
     nas_ip, ".1.3.6.1.2.1.25.1.1.0", &g_sysUptime);
 
-  const int volumeIndices[4] = {59, 57, 56, 58};
-  for (int i = 0; i < 4; ++i) {
-    snprintf(g_oidName[i], sizeof(g_oidName[i]),
-      ".1.3.6.1.2.1.25.2.3.1.3.%d", volumeIndices[i]);
-    cbName[i] = nasSnmp.addStringHandler(nas_ip, g_oidName[i], &g_volNames[i]);
-    snprintf(g_oidAlloc[i], sizeof(g_oidAlloc[i]),
-      ".1.3.6.1.2.1.25.2.3.1.4.%d", volumeIndices[i]);
-    cbAlloc[i] = nasSnmp.addIntegerHandler(nas_ip, g_oidAlloc[i], &g_volAlloc[i]);
-    snprintf(g_oidTotal[i], sizeof(g_oidTotal[i]),
-      ".1.3.6.1.2.1.25.2.3.1.5.%d", volumeIndices[i]);
-    cbTotal[i] = nasSnmp.addIntegerHandler(nas_ip, g_oidTotal[i], &g_volTotal[i]);
-    snprintf(g_oidUsed[i], sizeof(g_oidUsed[i]),
-      ".1.3.6.1.2.1.25.2.3.1.6.%d", volumeIndices[i]);
-    cbUsed[i] = nasSnmp.addIntegerHandler(nas_ip, g_oidUsed[i], &g_volUsed[i]);
+  for (int i = 0; i < MAX_NAS_VOLUMES; ++i) {
+    snprintf(g_oidAlloc[i], sizeof(g_oidAlloc[i]), "%s.0",
+             NAS_STORAGE_ALLOC_OID);
+    snprintf(g_oidTotal[i], sizeof(g_oidTotal[i]), "%s.0",
+             NAS_STORAGE_SIZE_OID);
+    snprintf(g_oidUsed[i], sizeof(g_oidUsed[i]), "%s.0",
+             NAS_STORAGE_USED_OID);
+    cbAlloc[i] = nasSnmp.addIntegerHandler(
+      nas_ip, g_oidAlloc[i], &g_volAlloc[i]);
+    cbTotal[i] = nasSnmp.addIntegerHandler(
+      nas_ip, g_oidTotal[i], &g_volTotal[i]);
+    cbUsed[i] = nasSnmp.addIntegerHandler(
+      nas_ip, g_oidUsed[i], &g_volUsed[i]);
   }
 
   nasCallbacksReady = true;
 }
 
-void fetchNAS() {
+bool updateNASCallbackOID(ValueCallback* callback, const char* oid) {
+  if (callback == nullptr || oid == nullptr) return false;
+  if (callback->OID != nullptr && strcmp(callback->OID, oid) == 0) {
+    return true;
+  }
+
+  const size_t oidLength = strlen(oid);
+  char* replacement = static_cast<char*>(malloc(oidLength + 1));
+  if (replacement == nullptr) return false;
+  memcpy(replacement, oid, oidLength + 1);
+  if (callback->OID != nullptr) free(callback->OID);
+  callback->OID = replacement;
+  return true;
+}
+
+bool setNASVolumeOIDs(int slot, uint32_t index) {
+  if (slot < 0 || slot >= MAX_NAS_VOLUMES) return false;
+  snprintf(g_oidAlloc[slot], sizeof(g_oidAlloc[slot]), "%s.%lu",
+           NAS_STORAGE_ALLOC_OID, static_cast<unsigned long>(index));
+  snprintf(g_oidTotal[slot], sizeof(g_oidTotal[slot]), "%s.%lu",
+           NAS_STORAGE_SIZE_OID, static_cast<unsigned long>(index));
+  snprintf(g_oidUsed[slot], sizeof(g_oidUsed[slot]), "%s.%lu",
+           NAS_STORAGE_USED_OID, static_cast<unsigned long>(index));
+  return updateNASCallbackOID(cbAlloc[slot], g_oidAlloc[slot]) &&
+         updateNASCallbackOID(cbTotal[slot], g_oidTotal[slot]) &&
+         updateNASCallbackOID(cbUsed[slot], g_oidUsed[slot]);
+}
+
+bool fetchNAS() {
   Serial.printf("Heap before NAS: %d\n", ESP.getFreeHeap());
   Serial.print("NAS...");
 
   initializeNASCallbacks();
+  if (!nasCallbacksReady) {
+    markSnapshotFailure(nasSnapshot);
+    return false;
+  }
   const uint32_t previousUptime = g_sysUptime;
   ValueCallback* uptimeCallbacks[] = {cbUptime};
   if (!requestNAS(uptimeCallbacks, 1, 1000, 1000)) {
@@ -1299,33 +1905,47 @@ void fetchNAS() {
     Serial.println(" NAS uptime stale");
   }
 
+  NASDiscoveredVolume discovered[MAX_NAS_VOLUMES] = {};
+  size_t discoveredCount = 0;
+  if (!discoverNASVolumes(discovered, MAX_NAS_VOLUMES, discoveredCount) ||
+      discoveredCount == 0) {
+    Serial.println(" NAS volume discovery failed");
+    markSnapshotFailure(nasSnapshot);
+    logHeap("after NAS");
+    return false;
+  }
+
   int stagedPoolCount = 0;
   bool volumesComplete = true;
   memset(stagedPools, 0, sizeof(stagedPools));
-  for (int i = 0; i < 4; ++i) {
-    memset(g_volNameBufs[i], 0, sizeof(g_volNameBufs[i]));
+  for (int i = 0; i < static_cast<int>(discoveredCount); ++i) {
+    if (!setNASVolumeOIDs(i, discovered[i].index)) {
+      Serial.printf(" NAS volume %d OID update failed\n", i + 1);
+      volumesComplete = false;
+      continue;
+    }
     g_volAlloc[i] = 0;
     g_volTotal[i] = 0;
     g_volUsed[i] = 0;
     ValueCallback* volumeCallbacks[] = {
-      cbName[i], cbAlloc[i], cbTotal[i], cbUsed[i]
+      cbAlloc[i], cbTotal[i], cbUsed[i]
     };
     const bool volumeComplete =
-      requestNAS(volumeCallbacks, 4, 1100 + i, 1000);
+      requestNAS(volumeCallbacks, 3, 1100 + i, 1000);
     if (!volumeComplete) {
       volumesComplete = false;
       continue;
     }
 
-    if (g_volNames[i][0] != '\0' && stagedPoolCount < 4) {
-      if (strncmp(g_volNames[i], "/volume", 7) == 0) {
+    if (stagedPoolCount < MAX_NAS_VOLUMES) {
+      if (strncmp(discovered[i].name, "/volume", 7) == 0) {
         snprintf(stagedPools[stagedPoolCount].name,
-          sizeof(stagedPools[stagedPoolCount].name),
-          "Vol %s", g_volNames[i] + 7);
+          sizeof(stagedPools[stagedPoolCount].name), "Vol %s",
+          discovered[i].name + 7);
       } else {
         copyText(stagedPools[stagedPoolCount].name,
           sizeof(stagedPools[stagedPoolCount].name),
-          g_volNames[i]);
+          discovered[i].name);
       }
       stagedPools[stagedPoolCount].status = 1;
       
@@ -1339,10 +1959,14 @@ void fetchNAS() {
       stagedPools[stagedPoolCount].total_tb = total_tb;
       stagedPools[stagedPoolCount].used_tb = used_tb;
       
-      if(total_tb > 0) {
-        stagedPools[stagedPoolCount].pct = (used_tb / total_tb) * 100;
+      if (total_tb > 0) {
+        stagedPools[stagedPoolCount].pct = min(
+          100, max(0, static_cast<int>((used_tb / total_tb) * 100)));
+        stagedPools[stagedPoolCount].free_pct = 100 -
+          stagedPools[stagedPoolCount].pct;
       } else {
         stagedPools[stagedPoolCount].pct = 0;
+        stagedPools[stagedPoolCount].free_pct = 0;
       }
       stagedPoolCount++;
     }
@@ -1353,10 +1977,15 @@ void fetchNAS() {
     pool_count = stagedPoolCount;
   } else {
     Serial.println("NAS volume refresh incomplete; retaining previous pools");
+    markSnapshotFailure(nasSnapshot);
+    logHeap("after NAS");
+    return false;
   }
 
+  markSnapshotSuccess(nasSnapshot);
   Serial.printf(" %d pools\n", pool_count);
   Serial.printf("Heap after NAS: %d\n", ESP.getFreeHeap());
+  return true;
 }
 
 // ===== 渲染 =====
@@ -1492,17 +2121,29 @@ void copyTextToPixelWidth(char* destination, size_t capacity,
   }
 }
 
-void drawHeader(int x, int y, int w, const char* title) {
+void drawSourceHeader(int x, int y, int w, const char* title,
+                      const DataSnapshot& snapshot) {
   u8g2Fonts.setFont(u8g2_font_helvB12_tf);
   u8g2Fonts.setCursor(x + 5, y + 20);
   u8g2Fonts.print(title);
-  display.drawLine(x, y + 25, x + w, y + 25, GxEPD_BLACK);
-}
-
-void drawChineseHeader(int x, int y, int w, const char* title) {
+  char status[24] = {};
+  formatSnapshotStatus(snapshot, status, sizeof(status));
   u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
-  u8g2Fonts.drawUTF8(x + 5, y + 20, title);
-  display.drawLine(x, y + 28, x + w, y + 28, GxEPD_BLACK);
+  const int statusWidth = u8g2Fonts.getUTF8Width(status);
+  const int statusX = x + w - statusWidth - 9;
+  if (snapshot.cached || snapshot.error) {
+    display.fillRect(statusX - 4, y + 4, statusWidth + 8, 21, GxEPD_BLACK);
+    u8g2Fonts.setFontMode(0);
+    u8g2Fonts.setForegroundColor(GxEPD_WHITE);
+    u8g2Fonts.setBackgroundColor(GxEPD_BLACK);
+    u8g2Fonts.drawUTF8(statusX, y + 20, status);
+    u8g2Fonts.setFontMode(1);
+    u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+    u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+  } else {
+    u8g2Fonts.drawUTF8(statusX, y + 20, status);
+  }
+  display.drawLine(x, y + 25, x + w, y + 25, GxEPD_BLACK);
 }
 
 void drawBoldUTF8(int x, int baselineY, const char* text) {
@@ -1596,7 +2237,7 @@ void drawWeatherRange(int x, int baselineY, const char* maximum,
 }
 
 int nasCapacitySummaryWidth(const char* used, const char* freeSpace,
-                            const char* total) {
+                            const char* total, int freePercent) {
   const int labelWidth =
     textWidthWithFont(u8g2_font_wqy16_t_gb2312, "已用") + 1 +
     textWidthWithFont(u8g2_font_wqy16_t_gb2312, "可用") + 1 +
@@ -1609,11 +2250,18 @@ int nasCapacitySummaryWidth(const char* used, const char* freeSpace,
   // between blocks for their vertical grid rules.
   const int labelValueGap = 2;
   const int fieldGap = 6;
-  return labelWidth + valueWidth + labelValueGap * 3 + fieldGap * 2;
+  char percent[8] = {};
+  snprintf(percent, sizeof(percent), "%d%%", freePercent);
+  const int badgeWidth = textWidthWithFont(
+    u8g2_font_wqy16_t_gb2312, "余") +
+    textWidthWithFont(u8g2_font_helvB10_tf, percent) + 12;
+  return labelWidth + valueWidth + labelValueGap * 3 + fieldGap * 3 +
+         badgeWidth;
 }
 
 void drawNASCapacitySummary(int x, int baselineY, const char* used,
-                            const char* freeSpace, const char* total) {
+                            const char* freeSpace, const char* total,
+                            int freePercent) {
   const int labelValueGap = 2;
   const int fieldGap = 6;
   const int dividerTop = baselineY - 17;
@@ -1628,7 +2276,27 @@ void drawNASCapacitySummary(int x, int baselineY, const char* used,
   drawGridDivider(x + fieldGap / 2, dividerTop, dividerBottom);
   x += fieldGap;
   x = drawChineseRun(x, baselineY, "总共") + labelValueGap;
-  drawLatinRun(x, baselineY - 1, total, u8g2_font_helvB10_tf);
+  x = drawLatinRun(x, baselineY - 1, total, u8g2_font_helvB10_tf) + fieldGap;
+
+  char percent[8] = {};
+  snprintf(percent, sizeof(percent), "%d%%", freePercent);
+  const int badgeWidth = textWidthWithFont(
+    u8g2_font_wqy16_t_gb2312, "余") +
+    textWidthWithFont(u8g2_font_helvB10_tf, percent) + 12;
+  display.fillRect(x, baselineY - 17, badgeWidth, 21, GxEPD_BLACK);
+  u8g2Fonts.setFontMode(0);
+  u8g2Fonts.setForegroundColor(GxEPD_WHITE);
+  u8g2Fonts.setBackgroundColor(GxEPD_BLACK);
+  u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
+  u8g2Fonts.setCursor(x + 4, baselineY);
+  u8g2Fonts.print("余");
+  const int labelWidth = u8g2Fonts.getUTF8Width("余");
+  u8g2Fonts.setFont(u8g2_font_helvB10_tf);
+  u8g2Fonts.setCursor(x + 4 + labelWidth, baselineY - 1);
+  u8g2Fonts.print(percent);
+  u8g2Fonts.setFontMode(1);
+  u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+  u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
 }
 
 void drawCalendar(int x, int y, int w, int h) {
@@ -1935,7 +2603,7 @@ void drawWeather(int x, int y, int w, int h) {
 void drawPVE(int x, int y, int w, int h) {
   char title[32];
   snprintf(title, sizeof(title), "PVE %s", pve_node.name);
-  drawHeader(x, y, w, title);
+  drawSourceHeader(x, y, w, title, pveSnapshot);
 
   const int vmRight = x + 68;
   const int ipRight = x + 170;
@@ -2008,7 +2676,14 @@ void drawPVE(int x, int y, int w, int h) {
 }
 
 void drawNAS(int x, int y, int w, int h) {
-  drawHeader(x, y, w, "Synology NAS");
+  drawSourceHeader(x, y, w, "Synology NAS", nasSnapshot);
+  if (pool_count == 0) {
+    u8g2Fonts.setFont(u8g2_font_wqy16_t_gb2312);
+    u8g2Fonts.setCursor(x + 16, y + 82);
+    u8g2Fonts.print(nasSnapshot.cached ? "使用缓存，暂无新卷数据" :
+                    (nasSnapshot.error ? "群晖数据不可用" : "暂无存储池数据"));
+    return;
+  }
   const int rows = max(pool_count, 1);
   const int contentTop = y + 29;
   const int contentHeight = h - 29;
@@ -2030,17 +2705,18 @@ void drawNAS(int x, int y, int w, int h) {
     if (free_tb < 1.0) sprintf(freeStr, "%.0fG", free_tb * 1024);
     else sprintf(freeStr, "%.1fT", free_tb);
     
-    u8g2Fonts.setFont(u8g2_font_helvB10_tf);
-    u8g2Fonts.setCursor(x + 8, baseline);
-    char poolName[9];
-    copyText(poolName, sizeof(poolName), pools[i].name);
-    u8g2Fonts.print(poolName);
-
     const int summaryWidth = nasCapacitySummaryWidth(
-      usedStr, freeStr, totalStr);
+      usedStr, freeStr, totalStr, pools[i].free_pct);
+    const int summaryX = x + w - summaryWidth - 8;
+    u8g2Fonts.setFont(u8g2_font_helvB10_tf);
+    char poolName[20] = {};
+    copyTextToPixelWidth(poolName, sizeof(poolName), pools[i].name,
+                         max(0, summaryX - (x + 8) - 8));
+    u8g2Fonts.setCursor(x + 8, baseline);
+    u8g2Fonts.print(poolName);
     drawNASCapacitySummary(
-      x + w - summaryWidth - 8, baseline,
-      usedStr, freeStr, totalStr);
+      summaryX, baseline, usedStr, freeStr, totalStr,
+      pools[i].free_pct);
 
     const int barY = min(rowTop + 24, rowBottom - 11);
     display.drawRect(x + 8, barY, w - 16, 10, GxEPD_BLACK);
@@ -2191,6 +2867,7 @@ bool updateWiFiContinuity(bool stayedConnected, const char* checkpoint) {
 bool refreshFullDashboard(const char* reason) {
   Serial.printf("Full refresh reason=%s\n", reason ? reason : "unspecified");
   displayReady = false;
+  currentRefreshDataTimeValid = false;
   const bool wifiConnectedAtStart = WiFi.status() == WL_CONNECTED;
   if (wifiConnectedAtStart) markWiFiConnectedObserved();
   bool wifiStayedConnected = wifiConnectedAtStart;
@@ -2198,6 +2875,10 @@ bool refreshFullDashboard(const char* reason) {
   wifiStayedConnected = updateWiFiContinuity(
     wifiStayedConnected, "full-start");
   syncTime();
+  if (timeValid) {
+    currentRefreshDataTime = timeinfo;
+    currentRefreshDataTimeValid = true;
+  }
   wifiStayedConnected = updateWiFiContinuity(
     wifiStayedConnected, "after-ntp");
   fetchWeather();
@@ -2295,6 +2976,7 @@ bool recoverCachedDashboard(const char* reason) {
 void setup() {
   Serial.begin(115200);
 
+  loadRuntimeConfig();
   wifiDisconnectHandler =
     WiFi.onStationModeDisconnected(onWiFiStationDisconnected);
   display.init(115200, true, 2, false);
@@ -2304,6 +2986,7 @@ void setup() {
 
   lastWifiRetryMs = millis();
   connectWifi();
+  startWebServices();
 
   initializeNASCallbacks();
   wifiWasConnected = WiFi.status() == WL_CONNECTED;
@@ -2313,6 +2996,7 @@ void setup() {
 }
 
 void loop() {
+  serviceWebServices();
   consumeWiFiDisconnectEvent("loop");
   const bool wifiConnectedNow = WiFi.status() == WL_CONNECTED;
   if (wifiConnectedNow) markWiFiConnectedObserved();

@@ -69,6 +69,13 @@ cp secrets.example.h secrets.h
 - `nas_ip`
 - Open-Meteo 经纬度和时区
 
+设备首次启动会读取 LittleFS 中的 `dashboard.cfg`。Wi-Fi 连接失败时会开启形如
+`ESP583-Setup-XXXXXX` 的配置热点，连接后访问串口日志中的地址（默认
+`192.168.4.1`）即可设置 Wi-Fi、PVE 地址/端口/API Token/证书指纹、群晖地址和
+SNMP Community。设备联网后也可以访问 `http://esp583.local/` 或设备 IP 修改配置。
+保存配置后设备会自动重启；密码字段留空表示保持原值。配置页仅提供局域网访问，
+不会把凭据绘制到电子纸屏幕上。
+
 PVE Token 需要读取节点、集群 VM 资源和运行中 VM Guest Agent 网络接口的权限。
 虚拟机内还需要安装并启用 QEMU Guest Agent。
 
